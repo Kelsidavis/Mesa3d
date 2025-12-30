@@ -296,6 +296,16 @@ cmd_buffer_free_resources(struct v3dv_cmd_buffer *cmd_buffer)
       v3dv_bo_free(cmd_buffer->device,
                    cmd_buffer->push_constants_resource.bo, 0);
 
+   /* Free push descriptor sets */
+   if (cmd_buffer->state.gfx.descriptor_state.push_set.set) {
+      vk_free(&cmd_buffer->device->vk.alloc,
+              cmd_buffer->state.gfx.descriptor_state.push_set.set);
+   }
+   if (cmd_buffer->state.compute.descriptor_state.push_set.set) {
+      vk_free(&cmd_buffer->device->vk.alloc,
+              cmd_buffer->state.compute.descriptor_state.push_set.set);
+   }
+
    list_for_each_entry_safe(struct v3dv_cmd_buffer_private_obj, pobj,
                             &cmd_buffer->private_objs, list_link) {
       cmd_buffer_destroy_private_obj(cmd_buffer, pobj);
@@ -3940,6 +3950,98 @@ v3dv_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
          cmd_buffer->state.dirty |= V3DV_CMD_DIRTY_COMPUTE_DESCRIPTOR_SETS;
          cmd_buffer->state.dirty_descriptor_stages |= VK_SHADER_STAGE_COMPUTE_BIT;
       }
+   }
+}
+
+static bool
+v3dv_cmd_buffer_init_push_descriptor_set(struct v3dv_cmd_buffer *cmd_buffer,
+                                          struct v3dv_descriptor_set_layout *layout,
+                                          VkPipelineBindPoint bind_point)
+{
+   struct v3dv_descriptor_state *descriptor_state =
+      bind_point == VK_PIPELINE_BIND_POINT_COMPUTE ?
+      &cmd_buffer->state.compute.descriptor_state :
+      &cmd_buffer->state.gfx.descriptor_state;
+
+   if (descriptor_state->push_set.capacity < layout->descriptor_count) {
+      size_t new_size = MAX2(layout->descriptor_count, 64);
+      new_size = MAX2(new_size, 2 * descriptor_state->push_set.capacity);
+      new_size = MIN2(new_size, 96 * MAX_PUSH_DESCRIPTORS);
+
+      /* Allocate the descriptor set struct plus space for descriptors */
+      size_t set_size = sizeof(struct v3dv_descriptor_set) +
+                        new_size * sizeof(struct v3dv_descriptor);
+      struct v3dv_descriptor_set *new_set =
+         vk_realloc(&cmd_buffer->device->vk.alloc,
+                    descriptor_state->push_set.set,
+                    set_size, 8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!new_set) {
+         descriptor_state->push_set.capacity = 0;
+         v3dv_flag_oom(cmd_buffer, NULL);
+         return false;
+      }
+
+      descriptor_state->push_set.set = new_set;
+      descriptor_state->push_set.capacity = new_size;
+   }
+
+   descriptor_state->push_set.set->layout = layout;
+   return true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdPushDescriptorSet2KHR(VkCommandBuffer commandBuffer,
+                               const VkPushDescriptorSetInfoKHR *pPushDescriptorSetInfo)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   V3DV_FROM_HANDLE(v3dv_pipeline_layout, layout, pPushDescriptorSetInfo->layout);
+
+   struct v3dv_descriptor_set_layout *set_layout =
+      layout->set[pPushDescriptorSetInfo->set].layout;
+
+   assert(set_layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT);
+
+   VkPipelineBindPoint bind_point;
+   if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+      bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+   } else {
+      bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
+   }
+
+   struct v3dv_descriptor_state *descriptor_state =
+      bind_point == VK_PIPELINE_BIND_POINT_COMPUTE ?
+      &cmd_buffer->state.compute.descriptor_state :
+      &cmd_buffer->state.gfx.descriptor_state;
+
+   if (!v3dv_cmd_buffer_init_push_descriptor_set(cmd_buffer,
+                                                  set_layout, bind_point))
+      return;
+
+   struct v3dv_descriptor_set *push_set = descriptor_state->push_set.set;
+
+   /* Update the push descriptors */
+   VkDevice vk_device = v3dv_device_to_handle(cmd_buffer->device);
+   VkDescriptorSet vk_push_set = v3dv_descriptor_set_to_handle(push_set);
+
+   for (uint32_t i = 0; i < pPushDescriptorSetInfo->descriptorWriteCount; i++) {
+      VkWriteDescriptorSet write = pPushDescriptorSetInfo->pDescriptorWrites[i];
+      write.dstSet = vk_push_set;
+      v3dv_UpdateDescriptorSets(vk_device, 1, &write, 0, NULL);
+   }
+
+   /* Bind the push descriptor set */
+   uint32_t set_index = pPushDescriptorSetInfo->set;
+   descriptor_state->valid |= (1u << set_index);
+   descriptor_state->descriptor_sets[set_index] = push_set;
+
+   if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+      cmd_buffer->state.dirty |= V3DV_CMD_DIRTY_DESCRIPTOR_SETS;
+      cmd_buffer->state.dirty_descriptor_stages |=
+         set_layout->shader_stages & VK_SHADER_STAGE_ALL_GRAPHICS;
+   } else {
+      cmd_buffer->state.dirty |= V3DV_CMD_DIRTY_COMPUTE_DESCRIPTOR_SETS;
+      cmd_buffer->state.dirty_descriptor_stages |= VK_SHADER_STAGE_COMPUTE_BIT;
    }
 }
 
