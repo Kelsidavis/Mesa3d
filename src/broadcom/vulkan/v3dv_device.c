@@ -234,6 +234,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_physical_device_drm              = true,
       .EXT_pipeline_creation_cache_control  = true,
       .EXT_pipeline_creation_feedback       = true,
+      .EXT_pipeline_protected_access        = true,
       .EXT_pipeline_robustness              = true,
       .EXT_primitive_topology_list_restart  = true,
       .EXT_private_data                     = true,
@@ -540,6 +541,12 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_host_image_copy */
       .hostImageCopy = true,
+
+      /* VK_EXT_pipeline_protected_access
+       * Set to false because V3D doesn't support protected memory.
+       * The extension is enabled to advertise the feature struct exists.
+       */
+      .pipelineProtectedAccess = false,
 
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
