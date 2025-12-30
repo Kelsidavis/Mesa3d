@@ -3037,3 +3037,56 @@ v3dX(cmd_buffer_prepare_suspend_job_for_submit)(struct v3dv_job *job)
 
    return clone;
 }
+
+void
+v3dX(cmd_buffer_emit_transform_feedback)(struct v3dv_cmd_buffer *cmd_buffer)
+{
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+   struct v3dv_job *job = state->job;
+   assert(job);
+
+   /* Only emit TF state if transform feedback is active */
+   if (!state->tf.active)
+      return;
+
+   /* Emit TRANSFORM_FEEDBACK_SPECS packet
+    *
+    * TODO: The actual TF output specs need to come from the pipeline's shader
+    * XFB info. For now, we just disable TF specs (enable=false) which means
+    * no data will be captured. Full implementation requires:
+    * 1. Parsing SPIR-V Xfb decorations during shader compilation
+    * 2. Generating TF specs similar to how Gallium does in v3d_program.c
+    * 3. Storing the specs in v3dv_pipeline
+    */
+   v3dv_cl_ensure_space_with_branch(
+      &job->bcl, cl_packet_length(TRANSFORM_FEEDBACK_SPECS));
+   v3dv_return_if_oom(cmd_buffer, NULL);
+
+   cl_emit(&job->bcl, TRANSFORM_FEEDBACK_SPECS, tfe) {
+      tfe.enable = false;  /* TODO: enable when we have TF specs from shader */
+      tfe.number_of_16_bit_output_data_specs_following = 0;
+   }
+
+   /* Emit TRANSFORM_FEEDBACK_BUFFER packets for bound buffers */
+   for (uint32_t i = 0; i < state->tf.buffer_count; i++) {
+      struct v3dv_buffer *buffer = state->tf.buffers[i].buffer;
+      if (!buffer)
+         continue;
+
+      v3dv_cl_ensure_space_with_branch(
+         &job->bcl, cl_packet_length(TRANSFORM_FEEDBACK_BUFFER));
+      v3dv_return_if_oom(cmd_buffer, NULL);
+
+      const uint32_t offset = buffer->mem_offset + state->tf.buffers[i].offset;
+
+      cl_emit(&job->bcl, TRANSFORM_FEEDBACK_BUFFER, output) {
+         output.buffer_address = v3dv_cl_address(buffer->mem->bo, offset);
+         output.buffer_size_in_32_bit_words = state->tf.buffers[i].size >> 2;
+         output.buffer_number = i;
+      }
+
+      v3dv_job_add_bo(job, buffer->mem->bo);
+   }
+
+   cmd_buffer->state.dirty &= ~V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK;
+}

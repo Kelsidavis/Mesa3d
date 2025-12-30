@@ -1067,7 +1067,8 @@ enum v3dv_cmd_dirty_bits {
    V3DV_CMD_DIRTY_OCCLUSION_QUERY           = 1 << 8,
    V3DV_CMD_DIRTY_VIEW_INDEX                = 1 << 9,
    V3DV_CMD_DIRTY_DRAW_ID                   = 1 << 10,
-   V3DV_CMD_DIRTY_ALL                       = (1 << 10) - 1,
+   V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK        = 1 << 11,
+   V3DV_CMD_DIRTY_ALL                       = (1 << 12) - 1,
 };
 
 struct v3dv_dynamic_state {
@@ -1626,6 +1627,32 @@ struct v3dv_cmd_buffer_state {
     * so we need to keep track of it in the cmd_buffer state
     */
    bool incompatible_ez_test;
+
+   /* VK_EXT_transform_feedback state */
+   struct {
+      /* Buffers bound via vkCmdBindTransformFeedbackBuffersEXT */
+      struct {
+         struct v3dv_buffer *buffer;
+         VkDeviceSize offset;
+         VkDeviceSize size;
+      } buffers[MAX_TF_BUFFERS];
+      uint32_t buffer_count;
+
+      /* Counter buffers for pausing/resuming */
+      struct {
+         struct v3dv_buffer *buffer;
+         VkDeviceSize offset;
+      } counter_buffers[MAX_TF_BUFFERS];
+
+      /* True if transform feedback is currently active (between Begin and End) */
+      bool active;
+
+      /* True if transform feedback was paused with counterBuffers in EndTF */
+      bool paused;
+
+      /* Primitives written counter for queries */
+      uint32_t primitives_written;
+   } tf;
 };
 
 void

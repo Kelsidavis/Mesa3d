@@ -97,6 +97,9 @@ void
 v3dX(cmd_buffer_emit_occlusion_query)(struct v3dv_cmd_buffer *cmd_buffer);
 
 void
+v3dX(cmd_buffer_emit_transform_feedback)(struct v3dv_cmd_buffer *cmd_buffer);
+
+void
 v3dX(cmd_buffer_emit_gl_shader_state)(struct v3dv_cmd_buffer *cmd_buffer);
 
 

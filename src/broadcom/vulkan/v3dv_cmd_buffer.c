@@ -3069,6 +3069,9 @@ v3dv_cmd_buffer_emit_pre_draw(struct v3dv_cmd_buffer *cmd_buffer,
    if (*dirty & V3DV_CMD_DIRTY_OCCLUSION_QUERY)
       v3d_X((&device->devinfo), cmd_buffer_emit_occlusion_query)(cmd_buffer);
 
+   if (*dirty & V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK)
+      v3d_X((&device->devinfo), cmd_buffer_emit_transform_feedback)(cmd_buffer);
+
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_WIDTH))
       v3d_X((&device->devinfo), cmd_buffer_emit_line_width)(cmd_buffer);
 
@@ -4741,4 +4744,131 @@ v3dv_CmdEndRenderingKHR(VkCommandBuffer commandBuffer)
    state->subpass_idx = -1;
    state->suspending = false;
    state->resuming = false;
+}
+
+/* VK_EXT_transform_feedback */
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdBindTransformFeedbackBuffersEXT(VkCommandBuffer commandBuffer,
+                                        uint32_t firstBinding,
+                                        uint32_t bindingCount,
+                                        const VkBuffer *pBuffers,
+                                        const VkDeviceSize *pOffsets,
+                                        const VkDeviceSize *pSizes)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+
+   assert(firstBinding + bindingCount <= MAX_TF_BUFFERS);
+
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      uint32_t idx = firstBinding + i;
+      struct v3dv_buffer *buffer = v3dv_buffer_from_handle(pBuffers[i]);
+
+      state->tf.buffers[idx].buffer = buffer;
+      state->tf.buffers[idx].offset = pOffsets[i];
+      state->tf.buffers[idx].size = pSizes ? pSizes[i] : VK_WHOLE_SIZE;
+
+      if (state->tf.buffers[idx].size == VK_WHOLE_SIZE)
+         state->tf.buffers[idx].size = buffer->size - pOffsets[i];
+   }
+
+   state->tf.buffer_count = MAX2(state->tf.buffer_count,
+                                  firstBinding + bindingCount);
+
+   state->dirty |= V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
+                                  uint32_t firstCounterBuffer,
+                                  uint32_t counterBufferCount,
+                                  const VkBuffer *pCounterBuffers,
+                                  const VkDeviceSize *pCounterBufferOffsets)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+
+   assert(!state->tf.active);
+
+   /* Store counter buffers for resume functionality */
+   if (pCounterBuffers) {
+      for (uint32_t i = 0; i < counterBufferCount; i++) {
+         uint32_t idx = firstCounterBuffer + i;
+         if (pCounterBuffers[i] != VK_NULL_HANDLE) {
+            state->tf.counter_buffers[idx].buffer =
+               v3dv_buffer_from_handle(pCounterBuffers[i]);
+            state->tf.counter_buffers[idx].offset =
+               pCounterBufferOffsets ? pCounterBufferOffsets[i] : 0;
+         } else {
+            state->tf.counter_buffers[idx].buffer = NULL;
+            state->tf.counter_buffers[idx].offset = 0;
+         }
+      }
+   }
+
+   state->tf.active = true;
+   state->tf.paused = false;
+
+   state->dirty |= V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdEndTransformFeedbackEXT(VkCommandBuffer commandBuffer,
+                                uint32_t firstCounterBuffer,
+                                uint32_t counterBufferCount,
+                                const VkBuffer *pCounterBuffers,
+                                const VkDeviceSize *pCounterBufferOffsets)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+
+   assert(state->tf.active);
+
+   /* If counter buffers are provided, we should save the current byte count
+    * for resume functionality. This requires flushing the TF data.
+    */
+   if (pCounterBuffers) {
+      state->tf.paused = true;
+      for (uint32_t i = 0; i < counterBufferCount; i++) {
+         uint32_t idx = firstCounterBuffer + i;
+         if (pCounterBuffers[i] != VK_NULL_HANDLE) {
+            state->tf.counter_buffers[idx].buffer =
+               v3dv_buffer_from_handle(pCounterBuffers[i]);
+            state->tf.counter_buffers[idx].offset =
+               pCounterBufferOffsets ? pCounterBufferOffsets[i] : 0;
+         }
+      }
+   }
+
+   state->tf.active = false;
+
+   state->dirty |= V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
+                                 uint32_t instanceCount,
+                                 uint32_t firstInstance,
+                                 VkBuffer counterBuffer,
+                                 VkDeviceSize counterBufferOffset,
+                                 uint32_t counterOffset,
+                                 uint32_t vertexStride)
+{
+   /* TODO: Implement draw from transform feedback buffer.
+    * This requires reading the byte count from the counter buffer
+    * and converting it to a vertex count based on stride.
+    * For now, this is a stub that will be implemented when we have
+    * full TF query support.
+    */
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   (void)cmd_buffer;
+   (void)instanceCount;
+   (void)firstInstance;
+   (void)counterBuffer;
+   (void)counterBufferOffset;
+   (void)counterOffset;
+   (void)vertexStride;
+
+   mesa_logw("v3dv: vkCmdDrawIndirectByteCountEXT not fully implemented");
 }
