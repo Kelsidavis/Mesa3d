@@ -174,6 +174,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_maintenance4                     = true,
       .KHR_maintenance5                     = true,
       .KHR_maintenance6                     = true,
+      .KHR_map_memory2                      = true,
       .KHR_push_descriptor                  = true,
       .KHR_global_priority                  = true,
       .KHR_shader_subgroup_rotate           = true,
@@ -182,6 +183,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_separate_depth_stencil_layouts   = true,
       .KHR_shader_expect_assume             = true,
       .KHR_shader_float_controls            = true,
+      .KHR_shader_float_controls2           = true,
       .KHR_shader_non_semantic_info         = true,
       .KHR_shader_relaxed_extended_instruction = true,
       .KHR_sampler_mirror_clamp_to_edge     = true,
@@ -531,6 +533,9 @@ get_features(const struct v3dv_physical_device *physical_device,
       /* VK_KHR_shader_subgroup_rotate */
       .shaderSubgroupRotate = true,
       .shaderSubgroupRotateClustered = true,
+
+      /* VK_KHR_shader_float_controls2 */
+      .shaderFloatControls2 = true,
 
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
@@ -2388,6 +2393,28 @@ v3dv_UnmapMemory(VkDevice _device,
       return;
 
    device_unmap(device, mem);
+}
+
+/* VK_KHR_map_memory2 */
+VKAPI_ATTR VkResult VKAPI_CALL
+v3dv_MapMemory2KHR(VkDevice _device,
+                   const VkMemoryMapInfoKHR *pMemoryMapInfo,
+                   void **ppData)
+{
+   return v3dv_MapMemory(_device,
+                         pMemoryMapInfo->memory,
+                         pMemoryMapInfo->offset,
+                         pMemoryMapInfo->size,
+                         pMemoryMapInfo->flags,
+                         ppData);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+v3dv_UnmapMemory2KHR(VkDevice _device,
+                     const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo)
+{
+   v3dv_UnmapMemory(_device, pMemoryUnmapInfo->memory);
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
