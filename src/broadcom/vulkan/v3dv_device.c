@@ -152,6 +152,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_descriptor_update_template       = true,
       .KHR_depth_stencil_resolve            = true,
       .KHR_dynamic_rendering                = true,
+      .KHR_dynamic_rendering_local_read    = true,
       .KHR_external_fence                   = true,
       .KHR_external_fence_fd                = true,
       .KHR_external_memory                  = true,
@@ -511,6 +512,9 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_dynamic_rendering */
       .dynamicRendering = true,
+
+      /* VK_KHR_dynamic_rendering_local_read */
+      .dynamicRenderingLocalRead = true,
 
       /* VK_KHR_maintenance5 */
       .maintenance5 = true,
@@ -1249,6 +1253,10 @@ get_device_properties(const struct v3dv_physical_device *device,
 
       /* VK_KHR_push_descriptor */
       .maxPushDescriptors = 32,
+
+      /* VK_KHR_dynamic_rendering_local_read */
+      .dynamicRenderingLocalReadDepthStencilAttachments = false,
+      .dynamicRenderingLocalReadMultisampledAttachments = true,
    };
 
    /* VkPhysicalDeviceShaderModuleIdentifierPropertiesEXT */
