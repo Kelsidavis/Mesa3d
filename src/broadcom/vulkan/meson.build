@@ -43,6 +43,7 @@ libv3dv_files = files(
   'v3dv_event.c',
   'v3dv_format_table.h',
   'v3dv_formats.c',
+  'v3dv_host_copy.c',
   'v3dv_image.c',
   'v3dv_image.h',
   'v3dv_limits.h',
