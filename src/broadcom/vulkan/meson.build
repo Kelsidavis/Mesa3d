@@ -131,7 +131,7 @@ broadcom_icd = custom_target(
   output : 'broadcom_icd.' + vulkan_manifest_suffix,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.3', '--xml', '@INPUT1@',
+    '--api-version', '1.4', '--xml', '@INPUT1@',
     '--sizeof-pointer', sizeof_pointer,
     '--icd-lib-path', vulkan_icd_lib_path,
     '--icd-filename', icd_file_name,
@@ -150,7 +150,7 @@ _dev_icd = custom_target(
   output : _dev_icdname,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.3', '--xml', '@INPUT1@',
+    '--api-version', '1.4', '--xml', '@INPUT1@',
     '--sizeof-pointer', sizeof_pointer,
     '--icd-lib-path', meson.current_build_dir(),
     '--icd-filename', icd_file_name,
