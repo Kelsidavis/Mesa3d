@@ -172,6 +172,8 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_maintenance3                     = true,
       .KHR_maintenance4                     = true,
       .KHR_maintenance5                     = true,
+      .KHR_maintenance6                     = true,
+      .KHR_push_descriptor                  = true,
       .KHR_multiview                        = true,
       .KHR_pipeline_executable_properties   = true,
       .KHR_separate_depth_stencil_layouts   = true,
@@ -508,6 +510,12 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_maintenance5 */
       .maintenance5 = true,
+
+      /* VK_KHR_maintenance6 */
+      .maintenance6 = true,
+
+      /* VK_KHR_push_descriptor */
+      .pushDescriptor = true,
 
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
@@ -1222,6 +1230,12 @@ get_device_properties(const struct v3dv_physical_device *device,
       .polygonModePointSize = true,
       .nonStrictSinglePixelWideLinesUseParallelogram = true,
       .nonStrictWideLinesUseParallelogram = true,
+
+      /* VK_KHR_maintenance6 */
+      .maxCombinedImageSamplerDescriptorCount = 1,
+
+      /* VK_KHR_push_descriptor */
+      .maxPushDescriptors = 32,
    };
 
    /* VkPhysicalDeviceShaderModuleIdentifierPropertiesEXT */

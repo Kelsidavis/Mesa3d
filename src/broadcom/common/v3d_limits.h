@@ -59,13 +59,15 @@
 /* Minimum alignment for texel buffers */
 #define V3D_TMU_TEXEL_ALIGN 64
 
-#define V3D_MAX_IMAGE_DIMENSION 4096
-
-/* The HW can do 16384 (15), but we run into hangs when we expose that. Also,
- * since we are only exposing images up to 4096 pixels per dimension 13 is
- * all we need.
+/* The HW can do 16384 (15 mip levels), but we limit to 8192 for Vulkan 1.4
+ * conformance. Higher values may cause stability issues that need investigation.
+ * TODO: Test 16384 on VideoCore VII (V3D 7.1) to see if the hang issues are
+ * resolved with recent kernel/driver fixes.
  */
-#define V3D_MAX_MIP_LEVELS 13
+#define V3D_MAX_IMAGE_DIMENSION 8192
+
+/* 8192 = 2^13, so we need 14 mip levels (level 0 = 8192, level 13 = 1) */
+#define V3D_MAX_MIP_LEVELS 14
 
 #define V3D_MAX_ARRAY_LAYERS 2048
 
