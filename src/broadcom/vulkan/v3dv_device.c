@@ -223,6 +223,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_external_memory_dma_buf          = true,
       .EXT_global_priority                  = true,
       .EXT_global_priority_query            = true,
+      .EXT_host_image_copy                  = true,
       .EXT_host_query_reset                 = true,
       .EXT_image_drm_format_modifier        = true,
       .EXT_image_robustness                 = true,
@@ -536,6 +537,9 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_shader_float_controls2 */
       .shaderFloatControls2 = true,
+
+      /* VK_EXT_host_image_copy */
+      .hostImageCopy = true,
 
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
@@ -1263,6 +1267,33 @@ get_device_properties(const struct v3dv_physical_device *device,
       .dynamicRenderingLocalReadDepthStencilAttachments = false,
       .dynamicRenderingLocalReadMultisampledAttachments = true,
    };
+
+   /* VK_EXT_host_image_copy - supported layouts for host copies.
+    * V3D handles tiling internally so we support all common layouts.
+    */
+   static const VkImageLayout v3dv_host_copy_layouts[] = {
+      VK_IMAGE_LAYOUT_GENERAL,
+      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+   };
+   properties->pCopySrcLayouts = v3dv_host_copy_layouts;
+   properties->copySrcLayoutCount = ARRAY_SIZE(v3dv_host_copy_layouts);
+   properties->pCopyDstLayouts = v3dv_host_copy_layouts;
+   properties->copyDstLayoutCount = ARRAY_SIZE(v3dv_host_copy_layouts);
+   /* Use driver UUID for optimal tiling - all V3D uses same tiling */
+   memcpy(properties->optimalTilingLayoutUUID, device->driver_uuid, VK_UUID_SIZE);
+   properties->identicalMemoryTypeRequirements = true;
 
    /* VkPhysicalDeviceShaderModuleIdentifierPropertiesEXT */
    STATIC_ASSERT(sizeof(vk_shaderModuleIdentifierAlgorithmUUID) ==
