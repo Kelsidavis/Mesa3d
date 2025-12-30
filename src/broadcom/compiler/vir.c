@@ -27,6 +27,7 @@
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_format_convert.h"
 #include "util/perf/cpu_trace.h"
+#include "util/bitscan.h"
 
 int
 vir_get_nsrc(struct qinst *inst)
@@ -1243,6 +1244,56 @@ v3d_nir_lower_vs_late(struct v3d_compile *c)
         NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
 }
 
+static bool
+v3d_nir_lower_cull_fs(nir_shader *shader, unsigned cull_enables)
+{
+        if (!cull_enables)
+                return false;
+
+        nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+        nir_builder b = nir_builder_at(nir_before_impl(impl));
+
+        /* Find or create cull distance input variable */
+        nir_variable *cull_var = NULL;
+        nir_foreach_shader_in_variable(var, shader) {
+                if (var->data.location == VARYING_SLOT_CULL_DIST0) {
+                        cull_var = var;
+                        break;
+                }
+        }
+
+        if (!cull_var) {
+                cull_var = nir_variable_create(shader, nir_var_shader_in,
+                                               glsl_array_type(glsl_float_type(),
+                                                               util_last_bit(cull_enables),
+                                                               sizeof(float)),
+                                               "cull_distance");
+                cull_var->data.location = VARYING_SLOT_CULL_DIST0;
+                cull_var->data.compact = true;
+        }
+
+        shader->info.cull_distance_array_size = util_last_bit(cull_enables);
+
+        /* Load cull distances and generate discards */
+        nir_def *cond = NULL;
+        for (int i = 0; i < 8 && (cull_enables >> i); i++) {
+                if (!(cull_enables & (1 << i)))
+                        continue;
+
+                nir_def *culldist = nir_load_array_var_imm(&b, cull_var, i);
+                nir_def *this_cond = nir_flt_imm(&b, culldist, 0.0);
+                cond = cond ? nir_ior(&b, cond, this_cond) : this_cond;
+        }
+
+        if (cond) {
+                nir_discard_if(&b, cond);
+                shader->info.fs.uses_discard = true;
+        }
+
+        nir_metadata_preserve(impl, nir_metadata_none);
+        return true;
+}
+
 static void
 v3d_nir_lower_fs_late(struct v3d_compile *c)
 {
@@ -1257,6 +1308,10 @@ v3d_nir_lower_fs_late(struct v3d_compile *c)
          */
         if (c->fs_key->ucp_enables)
                 NIR_PASS(_, c->s, nir_lower_clip_fs, c->fs_key->ucp_enables, true, false);
+
+        /* Similar lowering for cull distances */
+        if (c->fs_key->cull_enables)
+                NIR_PASS(_, c->s, v3d_nir_lower_cull_fs, c->fs_key->cull_enables);
 
         NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
 }

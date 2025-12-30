@@ -440,6 +440,7 @@ struct v3d_fs_key {
         uint8_t snorm;
 
         uint8_t ucp_enables;
+        uint8_t cull_enables;
 
         /* Color format information per render target. Only set when logic
          * operations are enabled, when fbfetch is in use or when falling back

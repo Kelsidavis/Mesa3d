@@ -1165,7 +1165,8 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
                              const struct vk_render_pass_state *rendering_info,
                              const struct v3dv_pipeline_stage *p_stage,
                              bool has_geometry_shader,
-                             uint32_t ucp_enables)
+                             uint32_t ucp_enables,
+                             uint32_t cull_enables)
 {
    assert(p_stage->stage == BROADCOM_SHADER_FRAGMENT);
 
@@ -1184,9 +1185,10 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
     * The only lowering we are interested is specific to the fragment shader,
     * where we want to emit discards to honor writes to gl_ClipDistance[] in
     * previous stages. This is done via nir_lower_clip_fs() so we only set up
-    * the ucp enable mask for that stage.
+    * the ucp enable mask for that stage. Same applies to cull distances.
     */
    key->ucp_enables = ucp_enables;
+   key->cull_enables = cull_enables;
 
    const VkPipelineInputAssemblyStateCreateInfo *ia_info =
       pCreateInfo->pInputAssemblyState;
@@ -1827,6 +1829,23 @@ get_ucp_enable_mask(struct v3dv_pipeline_stage *p_stage)
    return 0;
 }
 
+/* Similar to get_ucp_enable_mask but for cull distances */
+static uint32_t
+get_cull_enable_mask(struct v3dv_pipeline_stage *p_stage)
+{
+   assert(p_stage->stage == BROADCOM_SHADER_VERTEX);
+   const nir_shader *shader = p_stage->nir;
+   assert(shader);
+
+   nir_foreach_variable_with_modes(var, shader, nir_var_shader_out) {
+      if (var->data.location == VARYING_SLOT_CULL_DIST0) {
+         assert(var->data.compact);
+         return (1 << glsl_get_length(var->type)) - 1;
+      }
+   }
+   return 0;
+}
+
 static nir_shader *
 pipeline_stage_get_nir(struct v3dv_pipeline_stage *p_stage,
                        struct v3dv_pipeline *pipeline,
@@ -1963,7 +1982,8 @@ pipeline_compile_fragment_shader(struct v3dv_pipeline *pipeline,
    struct v3d_fs_key key;
    pipeline_populate_v3d_fs_key(&key, pCreateInfo, &pipeline->rendering_info,
                                 p_stage_fs, p_stage_gs != NULL,
-                                get_ucp_enable_mask(p_stage_vs));
+                                get_ucp_enable_mask(p_stage_vs),
+                                get_cull_enable_mask(p_stage_vs));
 
    if (key.is_points) {
       assert(key.point_coord_upper_left);
