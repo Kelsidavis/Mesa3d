@@ -30,6 +30,7 @@
 
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_lower_blend.h"
+#include "compiler/nir/nir_xfb_info.h"
 #include "nir/nir_serialize.h"
 
 #include "util/format/u_format.h"
@@ -2425,6 +2426,78 @@ pipeline_check_buffer_device_address(struct v3dv_pipeline *pipeline)
    pipeline->uses_buffer_device_address = false;
 }
 
+/**
+ * Generate transform feedback output specs from NIR xfb_info.
+ * This is similar to v3d_set_transform_feedback_outputs in Gallium.
+ */
+static void
+pipeline_set_xfb_outputs(struct v3dv_pipeline *pipeline,
+                         nir_shader *vs_nir)
+{
+   nir_xfb_info *xfb = vs_nir->xfb_info;
+   if (!xfb || xfb->output_count == 0) {
+      pipeline->tf.num_specs = 0;
+      return;
+   }
+
+   /* Map from location to VPM offset. We need to know where each varying
+    * ends up in the VPM to generate the TF specs.
+    */
+   uint32_t slot_count = 0;
+
+   for (uint32_t buffer = 0; buffer < MAX_TF_BUFFERS; buffer++) {
+      pipeline->tf.stride[buffer] = xfb->buffers[buffer].stride;
+
+      uint32_t buffer_offset = 0;
+      uint32_t vpm_start = slot_count;
+
+      for (uint32_t i = 0; i < xfb->output_count; i++) {
+         const nir_xfb_output_info *output = &xfb->outputs[i];
+
+         if (output->buffer != buffer)
+            continue;
+
+         /* Calculate how many components (32-bit values) to output */
+         uint32_t num_components = util_bitcount(output->component_mask);
+         if (num_components == 0)
+            continue;
+
+         /* The component_offset tells us which component of the varying
+          * to start reading from, and component_mask tells us which
+          * components to output.
+          */
+         uint32_t vpm_offset = vpm_start + output->component_offset;
+
+         /* Pack the TF output data spec:
+          * - first_shaded_vertex_value_to_output: VPM offset
+          * - number_of_consecutive_vertex_values: num_components - 1
+          * - output_buffer: buffer index
+          */
+         assert(pipeline->tf.num_specs < ARRAY_SIZE(pipeline->tf.specs));
+
+         /* Pack using V3D42 format (same as V3D71) */
+         uint16_t spec = 0;
+         spec |= (vpm_offset & 0xFF);               /* first value: bits 0-7 */
+         spec |= ((num_components - 1) & 0xF) << 8; /* num values - 1: bits 8-11 */
+         spec |= (buffer & 0x3) << 12;              /* buffer: bits 12-13 */
+         /* stream in bits 14-15, but we only support stream 0 */
+
+         pipeline->tf.specs[pipeline->tf.num_specs] = spec;
+
+         /* Also create psiz variant (VPM offset + 1 for point size) */
+         uint16_t spec_psiz = spec;
+         spec_psiz = (spec_psiz & ~0xFF) | ((vpm_offset + 1) & 0xFF);
+         pipeline->tf.specs_psiz[pipeline->tf.num_specs] = spec_psiz;
+
+         pipeline->tf.num_specs++;
+
+         buffer_offset = output->offset + num_components * 4;
+      }
+
+      slot_count += xfb->buffers[buffer].varying_count;
+   }
+}
+
 /*
  * It compiles a pipeline. Note that it also allocate internal object, but if
  * some allocations success, but other fails, the method is not freeing the
@@ -2635,6 +2708,14 @@ pipeline_compile_graphics(struct v3dv_pipeline *pipeline,
 
    pipeline_lower_nir(pipeline, p_stage_vs, pipeline->layout);
    lower_vs_io(p_stage_vs->nir);
+
+   /* Generate transform feedback specs from the last vertex processing stage.
+    * We need to gather xfb_info if it wasn't already populated by spirv_to_nir.
+    */
+   nir_shader *xfb_shader = p_stage_gs ? p_stage_gs->nir : p_stage_vs->nir;
+   if (!xfb_shader->xfb_info)
+      nir_shader_gather_xfb_info(xfb_shader);
+   pipeline_set_xfb_outputs(pipeline, xfb_shader);
 
    /* Compiling to vir */
    VkResult vk_result;

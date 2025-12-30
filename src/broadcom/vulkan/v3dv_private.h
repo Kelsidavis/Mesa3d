@@ -2403,6 +2403,19 @@ struct v3dv_pipeline {
    uint8_t vertex_attrs[V3DV_GL_SHADER_STATE_ATTRIBUTE_RECORD_LENGTH *
                         MAX_VERTEX_ATTRIBS];
    uint8_t stencil_cfg[2][V3DV_STENCIL_CFG_LENGTH];
+
+   /* VK_EXT_transform_feedback */
+   struct {
+      /* Prepacked TRANSFORM_FEEDBACK_OUTPUT_DATA_SPEC packets.
+       * Each spec is 16 bits, max 16 specs per Gallium convention.
+       */
+      uint16_t specs[16];
+      /* Alternate specs with point size offset (+1) for when psiz is written */
+      uint16_t specs_psiz[16];
+      uint32_t num_specs;
+      /* Per-buffer strides in bytes */
+      uint16_t stride[MAX_TF_BUFFERS];
+   } tf;
 };
 
 static inline bool

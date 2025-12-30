@@ -3049,22 +3049,35 @@ v3dX(cmd_buffer_emit_transform_feedback)(struct v3dv_cmd_buffer *cmd_buffer)
    if (!state->tf.active)
       return;
 
-   /* Emit TRANSFORM_FEEDBACK_SPECS packet
-    *
-    * TODO: The actual TF output specs need to come from the pipeline's shader
-    * XFB info. For now, we just disable TF specs (enable=false) which means
-    * no data will be captured. Full implementation requires:
-    * 1. Parsing SPIR-V Xfb decorations during shader compilation
-    * 2. Generating TF specs similar to how Gallium does in v3d_program.c
-    * 3. Storing the specs in v3dv_pipeline
+   struct v3dv_pipeline *pipeline = state->gfx.pipeline;
+   assert(pipeline);
+
+   /* Check if the pipeline has transform feedback outputs */
+   bool has_tf = pipeline->tf.num_specs > 0;
+
+   /* Determine if we need psiz-adjusted specs. This happens when the vertex
+    * shader writes gl_PointSize, which shifts VPM offsets by 1.
     */
+   struct v3dv_shader_variant *vs =
+      pipeline->shared_data->variants[BROADCOM_SHADER_VERTEX];
+   bool writes_psiz = vs && vs->prog_data.vs->writes_psiz;
+   const uint16_t *tf_specs = writes_psiz ? pipeline->tf.specs_psiz
+                                          : pipeline->tf.specs;
+
+   /* Emit TRANSFORM_FEEDBACK_SPECS packet */
    v3dv_cl_ensure_space_with_branch(
-      &job->bcl, cl_packet_length(TRANSFORM_FEEDBACK_SPECS));
+      &job->bcl, cl_packet_length(TRANSFORM_FEEDBACK_SPECS) +
+                 pipeline->tf.num_specs * 2);
    v3dv_return_if_oom(cmd_buffer, NULL);
 
    cl_emit(&job->bcl, TRANSFORM_FEEDBACK_SPECS, tfe) {
-      tfe.enable = false;  /* TODO: enable when we have TF specs from shader */
-      tfe.number_of_16_bit_output_data_specs_following = 0;
+      tfe.enable = has_tf;
+      tfe.number_of_16_bit_output_data_specs_following = pipeline->tf.num_specs;
+   }
+
+   /* Emit the prepacked TF output data specs */
+   for (uint32_t i = 0; i < pipeline->tf.num_specs; i++) {
+      cl_emit_prepacked(&job->bcl, &tf_specs[i]);
    }
 
    /* Emit TRANSFORM_FEEDBACK_BUFFER packets for bound buffers */
