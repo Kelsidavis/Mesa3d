@@ -204,6 +204,8 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_maintenance5                     = true,
       .KHR_maintenance6                     = true,
       .KHR_push_descriptor                  = true,
+      .KHR_global_priority                  = true,
+      .KHR_shader_subgroup_rotate           = true,
       .KHR_multiview                        = true,
       .KHR_pipeline_executable_properties   = true,
       .KHR_separate_depth_stencil_layouts   = true,
@@ -255,6 +257,8 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_extended_dynamic_state           = true,
       .EXT_extended_dynamic_state2          = true,
       .EXT_external_memory_dma_buf          = true,
+      .EXT_global_priority                  = true,
+      .EXT_global_priority_query            = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .EXT_hdr_metadata                     = true,
 #endif
@@ -591,6 +595,13 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_push_descriptor */
       .pushDescriptor = true,
+
+      /* VK_KHR_global_priority / VK_EXT_global_priority_query */
+      .globalPriorityQuery = true,
+
+      /* VK_KHR_shader_subgroup_rotate */
+      .shaderSubgroupRotate = true,
+      .shaderSubgroupRotateClustered = true,
 
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
@@ -1806,6 +1817,17 @@ v3dv_queue_family_properties = {
    .minImageTransferGranularity = { 1, 1, 1 },
 };
 
+/* Supported global queue priorities for VK_KHR_global_priority.
+ * V3D doesn't have kernel-level priority support, but we accept all
+ * priorities for compatibility. MEDIUM is the effective priority.
+ */
+static const VkQueueGlobalPriorityKHR v3dv_global_queue_priorities[] = {
+   VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR,
+   VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR,
+   VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR,
+   VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR,
+};
+
 VKAPI_ATTR void VKAPI_CALL
 v3dv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
                                              uint32_t *pQueueFamilyPropertyCount,
@@ -1818,7 +1840,20 @@ v3dv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
       p->queueFamilyProperties = v3dv_queue_family_properties;
 
       vk_foreach_struct(sType, s, p->pNext) {
-         vk_debug_ignored_stype(sType);
+         switch (sType) {
+         case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
+            VkQueueFamilyGlobalPriorityPropertiesKHR *priority_props =
+               (VkQueueFamilyGlobalPriorityPropertiesKHR *) s;
+            priority_props->priorityCount = ARRAY_SIZE(v3dv_global_queue_priorities);
+            assert(priority_props->priorityCount <= VK_MAX_GLOBAL_PRIORITY_SIZE_KHR);
+            memcpy(priority_props->priorities, v3dv_global_queue_priorities,
+                   sizeof(v3dv_global_queue_priorities));
+            break;
+         }
+         default:
+            vk_debug_ignored_stype(sType);
+            break;
+         }
       }
    }
 }
