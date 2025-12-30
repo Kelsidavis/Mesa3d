@@ -292,6 +292,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
 #endif
       .EXT_texel_buffer_alignment           = true,
       .EXT_tooling_info                     = true,
+      .EXT_transform_feedback               = true,
       .EXT_vertex_attribute_divisor         = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(device->vk.instance, &v3dv_instance->drirc.options),
@@ -525,8 +526,11 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_provoking_vertex */
       .provokingVertexLast = true,
-      /* FIXME: update when supporting EXT_transform_feedback */
-      .transformFeedbackPreservesProvokingVertex = false,
+      .transformFeedbackPreservesProvokingVertex = true,
+
+      /* VK_EXT_transform_feedback */
+      .transformFeedback = true,
+      .geometryStreams = false,  /* requires geometry shaders */
 
       /* VK_EXT_vertex_attribute_divisor */
       .vertexAttributeInstanceRateDivisor = true,
@@ -1363,8 +1367,19 @@ get_device_properties(const struct v3dv_physical_device *device,
 
       /* VkPhysicalDeviceProvokingVertexPropertiesEXT */
       .provokingVertexModePerPipeline = true,
-      /* FIXME: update when supporting EXT_transform_feedback */
-      .transformFeedbackPreservesTriangleFanProvokingVertex = false,
+      .transformFeedbackPreservesTriangleFanProvokingVertex = true,
+
+      /* VkPhysicalDeviceTransformFeedbackPropertiesEXT */
+      .maxTransformFeedbackStreams = MAX_TF_STREAMS,
+      .maxTransformFeedbackBuffers = MAX_TF_BUFFERS,
+      .maxTransformFeedbackBufferSize = UINT32_MAX,
+      .maxTransformFeedbackStreamDataSize = 512,
+      .maxTransformFeedbackBufferDataSize = 512,
+      .maxTransformFeedbackBufferDataStride = 2048,
+      .transformFeedbackQueries = true,
+      .transformFeedbackStreamsLinesTriangles = true,
+      .transformFeedbackRasterizationStreamSelect = false,
+      .transformFeedbackDraw = true,
 
       /* VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT */
       .maxVertexAttribDivisor = V3D_MAX_VERTEX_ATTRIB_DIVISOR,

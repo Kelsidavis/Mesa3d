@@ -64,6 +64,10 @@
 
 #define MAX_MULTIVIEW_VIEW_COUNT 16
 
+/* Transform feedback limits */
+#define MAX_TF_BUFFERS 4
+#define MAX_TF_STREAMS 1  /* Only stream 0 is supported without geometry shaders */
+
 #define V3DV_SUPPORTED_SHADER_STAGES 4
 
 #define V3DV_MAX_PLANE_COUNT 3

@@ -283,7 +283,8 @@ enum v3dv_cmd_dirty_bits {
    V3DV_CMD_DIRTY_OCCLUSION_QUERY           = 1 << 8,
    V3DV_CMD_DIRTY_VIEW_INDEX                = 1 << 9,
    V3DV_CMD_DIRTY_DRAW_ID                   = 1 << 10,
-   V3DV_CMD_DIRTY_ALL                       = (1 << 10) - 1,
+   V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK        = 1 << 11,
+   V3DV_CMD_DIRTY_ALL                       = (1 << 12) - 1,
 };
 
 struct v3dv_dynamic_state {
