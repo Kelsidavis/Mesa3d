@@ -1277,7 +1277,21 @@ v3d_nir_lower_fs_early(struct v3d_compile *c)
                 NIR_PASS(_, c->s, v3d_nir_lower_blend, c);
         }
 
-        NIR_PASS(_, c->s, v3d_nir_lower_logic_ops, c);
+        /* For VK_EXT_extended_dynamic_state3, use dynamic logic op enable
+         * when a non-COPY logic op is specified. The uniform controls whether
+         * it's actually applied at runtime.
+         */
+        if (c->fs_key->logicop_func != PIPE_LOGICOP_COPY) {
+                nir_function_impl *impl = nir_shader_get_entrypoint(c->s);
+                nir_builder b = nir_builder_at(nir_before_impl(impl));
+
+                nir_def *logicop_enabled = nir_ine_imm(&b,
+                        nir_load_logic_op_enabled_v3d(&b), 0);
+
+                NIR_PASS(_, c->s, v3d_nir_lower_logic_ops_dynamic, c,
+                         logicop_enabled);
+        }
+
         NIR_PASS(_, c->s, v3d_nir_lower_16bit_norm, c);
         NIR_PASS(_, c->s, v3d_nir_lower_load_output, c);
 }

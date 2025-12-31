@@ -373,6 +373,12 @@ enum quniform_contents {
          */
         QUNIFORM_ALPHA_TO_COVERAGE_ENABLED,
         QUNIFORM_ALPHA_TO_ONE_ENABLED,
+
+        /**
+         * Dynamic logic op enable flag.
+         * Used for VK_EXT_extended_dynamic_state3.
+         */
+        QUNIFORM_LOGIC_OP_ENABLED,
 };
 
 static inline uint32_t v3d_unit_data_create(uint32_t unit, uint32_t value)
@@ -1229,6 +1235,8 @@ bool vir_opt_constant_alu(struct v3d_compile *c);
 bool v3d_nir_lower_io(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_line_smooth(nir_shader *shader);
 bool v3d_nir_lower_logic_ops(nir_shader *s, struct v3d_compile *c);
+bool v3d_nir_lower_logic_ops_dynamic(nir_shader *s, struct v3d_compile *c,
+                                     nir_def *dyn_enable);
 bool v3d_nir_lower_scratch(nir_shader *s);
 bool v3d_nir_lower_txf_ms(nir_shader *s);
 bool v3d_nir_lower_image_load_store(nir_shader *s, struct v3d_compile *c);

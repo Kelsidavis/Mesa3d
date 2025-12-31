@@ -471,7 +471,7 @@ get_features(const struct v3dv_physical_device *physical_device,
       .extendedDynamicState3RasterizationStream = false, /* no geometry shaders */
       .extendedDynamicState3LineStippleEnable = false, /* no stipple support */
       .extendedDynamicState3LineRasterizationMode = true,
-      .extendedDynamicState3LogicOpEnable = false, /* requires shader variants */
+      .extendedDynamicState3LogicOpEnable = true,
       .extendedDynamicState3AlphaToOneEnable = true,
       .extendedDynamicState3DepthClipEnable = physical_device->devinfo.ver >= 71,
       .extendedDynamicState3DepthClampEnable = physical_device->devinfo.ver >= 71,
