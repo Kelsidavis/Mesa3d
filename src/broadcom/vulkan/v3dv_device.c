@@ -472,7 +472,7 @@ get_features(const struct v3dv_physical_device *physical_device,
       .extendedDynamicState3LineStippleEnable = false, /* no stipple support */
       .extendedDynamicState3LineRasterizationMode = true,
       .extendedDynamicState3LogicOpEnable = false, /* requires shader variants */
-      .extendedDynamicState3AlphaToOneEnable = false, /* requires shader changes */
+      .extendedDynamicState3AlphaToOneEnable = true,
       .extendedDynamicState3DepthClipEnable = physical_device->devinfo.ver >= 71,
       .extendedDynamicState3DepthClampEnable = physical_device->devinfo.ver >= 71,
       .extendedDynamicState3DepthClipNegativeOneToOne = physical_device->devinfo.ver >= 71,
@@ -483,7 +483,7 @@ get_features(const struct v3dv_physical_device *physical_device,
       .extendedDynamicState3SampleLocationsEnable = false, /* not supported */
       .extendedDynamicState3SampleMask = true,
       .extendedDynamicState3ConservativeRasterizationMode = false, /* not supported */
-      .extendedDynamicState3AlphaToCoverageEnable = false, /* requires shader changes */
+      .extendedDynamicState3AlphaToCoverageEnable = true,
       .extendedDynamicState3RasterizationSamples = false, /* complex, affects shaders */
       .extendedDynamicState3ExtraPrimitiveOverestimationSize = false,
       .extendedDynamicState3ViewportWScalingEnable = false,

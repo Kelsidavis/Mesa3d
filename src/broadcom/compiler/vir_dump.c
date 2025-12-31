@@ -37,6 +37,8 @@ vir_dump_uniform(enum quniform_contents contents,
                 [QUNIFORM_VIEWPORT_Z_OFFSET] = "vp_z_offset",
                 [QUNIFORM_VIEWPORT_Z_SCALE] = "vp_z_scale",
                 [QUNIFORM_SHARED_OFFSET] = "shared_offset",
+                [QUNIFORM_ALPHA_TO_COVERAGE_ENABLED] = "alpha_to_coverage_enabled",
+                [QUNIFORM_ALPHA_TO_ONE_ENABLED] = "alpha_to_one_enabled",
         };
 
         switch (contents) {

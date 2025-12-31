@@ -2162,6 +2162,12 @@ intrinsic("load_fb_layers_v3d", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])
 # V3D-specific intrinsic to load W coordinate from the fragment shader payload
 intrinsic("load_fep_w_v3d", dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# V3D-specific intrinsics for dynamic alpha-to-coverage/alpha-to-one state
+intrinsic("load_alpha_to_coverage_enabled_v3d", dest_comp=1, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_alpha_to_one_enabled_v3d", dest_comp=1, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Active invocation index within the subgroup.
 # Equivalent to popcount(ballot(true) & ((1 << subgroup_invocation) - 1))
 intrinsic("load_active_subgroup_invocation_agx", dest_comp=1, flags=[CAN_ELIMINATE])

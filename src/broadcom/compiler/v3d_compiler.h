@@ -366,6 +366,13 @@ enum quniform_contents {
         QUNIFORM_BLEND_CONSTANT_G,
         QUNIFORM_BLEND_CONSTANT_B,
         QUNIFORM_BLEND_CONSTANT_A,
+
+        /**
+         * Dynamic alpha-to-coverage and alpha-to-one enable flags.
+         * Used for VK_EXT_extended_dynamic_state3.
+         */
+        QUNIFORM_ALPHA_TO_COVERAGE_ENABLED,
+        QUNIFORM_ALPHA_TO_ONE_ENABLED,
 };
 
 static inline uint32_t v3d_unit_data_create(uint32_t unit, uint32_t value)

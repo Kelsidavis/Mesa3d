@@ -3891,6 +3891,16 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                               vir_uniform(c, QUNIFORM_FB_LAYERS, 0));
                 break;
 
+        case nir_intrinsic_load_alpha_to_coverage_enabled_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_ALPHA_TO_COVERAGE_ENABLED, 0));
+                break;
+
+        case nir_intrinsic_load_alpha_to_one_enabled_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_ALPHA_TO_ONE_ENABLED, 0));
+                break;
+
         case nir_intrinsic_load_sample_id:
                 ntq_store_def(c, &instr->def, 0, vir_SAMPID(c));
                 break;

@@ -1203,6 +1203,41 @@ v3d_nir_lower_16bit_norm(nir_shader *s, struct v3d_compile *c)
         return nir_shader_intrinsics_pass(s, lower_16bit_norm, nir_metadata_control_flow, c);
 }
 
+/* Dynamic alpha-to-one lowering for VK_EXT_extended_dynamic_state3.
+ * Conditionally replaces alpha with 1.0 based on a dynamic enable flag.
+ */
+static void
+v3d_nir_lower_alpha_to_one_dynamic(nir_shader *shader, nir_def *dyn_enable)
+{
+        nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+        nir_block *block = nir_impl_last_block(impl);
+
+        nir_foreach_instr(instr, block) {
+                if (instr->type != nir_instr_type_intrinsic)
+                        continue;
+
+                nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                if (intr->intrinsic != nir_intrinsic_store_output)
+                        continue;
+
+                nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+                if (sem.location < FRAG_RESULT_DATA0)
+                        continue;
+
+                nir_def *rgba = intr->src[0].ssa;
+                if (rgba->num_components < 4)
+                        continue;
+
+                nir_builder b = nir_builder_at(nir_before_instr(instr));
+                nir_def *one = nir_imm_floatN_t(&b, 1.0, rgba->bit_size);
+                nir_def *orig_alpha = nir_channel(&b, rgba, 3);
+                nir_def *new_alpha = nir_bcsel(&b, dyn_enable, one, orig_alpha);
+                nir_def *rgb1 = nir_vector_insert_imm(&b, rgba, new_alpha, 3);
+
+                nir_src_rewrite(&intr->src[0], rgb1);
+        }
+}
+
 static void
 v3d_nir_lower_fs_early(struct v3d_compile *c)
 {
@@ -1214,15 +1249,30 @@ v3d_nir_lower_fs_early(struct v3d_compile *c)
         }
 
         if (c->fs_key->software_blend) {
-                if (c->fs_key->sample_alpha_to_coverage) {
-                        assert(c->fs_key->msaa);
+                /* For VK_EXT_extended_dynamic_state3, always compile with
+                 * dynamic alpha-to-coverage and alpha-to-one support when
+                 * MSAA is enabled. The uniforms control whether they're
+                 * actually applied.
+                 */
+                if (c->fs_key->msaa) {
+                        nir_function_impl *impl =
+                                nir_shader_get_entrypoint(c->s);
+                        nir_builder b = nir_builder_at(
+                                nir_before_impl(impl));
+
+                        /* Load dynamic alpha-to-coverage enable flag */
+                        nir_def *a2c_enabled = nir_ine_imm(&b,
+                                nir_load_alpha_to_coverage_enabled_v3d(&b), 0);
 
                         NIR_PASS(_, c->s, nir_lower_alpha_to_coverage,
-                                 V3D_MAX_SAMPLES, true, NULL);
-                }
+                                 V3D_MAX_SAMPLES, true, a2c_enabled);
 
-                if (c->fs_key->sample_alpha_to_one)
-                        NIR_PASS(_, c->s, nir_lower_alpha_to_one);
+                        /* Load dynamic alpha-to-one enable flag and apply */
+                        nir_def *a2o_enabled = nir_ine_imm(&b,
+                                nir_load_alpha_to_one_enabled_v3d(&b), 0);
+
+                        v3d_nir_lower_alpha_to_one_dynamic(c->s, a2o_enabled);
+                }
 
                 NIR_PASS(_, c->s, v3d_nir_lower_blend, c);
         }
