@@ -250,6 +250,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_separate_stencil_usage           = true,
       .EXT_shader_demote_to_helper_invocation = true,
       .EXT_shader_module_identifier         = true,
+      .EXT_shader_replicated_composites     = true,
       .EXT_subgroup_size_control            = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .EXT_swapchain_maintenance1           = true,
@@ -517,6 +518,9 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_shader_demote_to_helper_invocation */
       .shaderDemoteToHelperInvocation = true,
+
+      /* VK_EXT_shader_replicated_composites */
+      .shaderReplicatedComposites = true,
 
       /* VK_EXT_subgroup_size_control */
       .subgroupSizeControl = true,
