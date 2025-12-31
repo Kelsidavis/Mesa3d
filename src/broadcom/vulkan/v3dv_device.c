@@ -356,7 +356,7 @@ get_features(const struct v3dv_physical_device *physical_device,
        */
       .textureCompressionBC = false,
       .occlusionQueryPrecise = true,
-      .pipelineStatisticsQuery = false,
+      .pipelineStatisticsQuery = true,
       .vertexPipelineStoresAndAtomics = true,
       .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = true,
