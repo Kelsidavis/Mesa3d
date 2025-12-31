@@ -1406,9 +1406,13 @@ struct v3dv_vertex_binding {
    VkDeviceSize size;
 };
 
-/* Push descriptor set for VK_KHR_push_descriptor */
+/* Push descriptor set for VK_KHR_push_descriptor.
+ * Uses a pointer to v3dv_descriptor_set since it has a flexible array member
+ * and cannot be embedded directly.
+ */
+struct v3dv_descriptor_set;
 struct v3dv_push_descriptor_set {
-   struct v3dv_descriptor_set set;
+   struct v3dv_descriptor_set *set;
    uint32_t capacity;
 };
 

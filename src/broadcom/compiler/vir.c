@@ -1290,8 +1290,7 @@ v3d_nir_lower_cull_fs(nir_shader *shader, unsigned cull_enables)
                 shader->info.fs.uses_discard = true;
         }
 
-        nir_metadata_preserve(impl, nir_metadata_none);
-        return true;
+        return nir_progress(true, impl, nir_metadata_none);
 }
 
 static void

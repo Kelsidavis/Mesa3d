@@ -279,12 +279,14 @@ cmd_buffer_free_resources(struct v3dv_cmd_buffer *cmd_buffer)
       v3dv_bo_free(cmd_buffer->device, cmd_buffer->push_constants_resource.bo);
 
    /* Free push descriptor sets */
-   if (cmd_buffer->state.gfx.descriptor_state.push_set.set.descriptors)
+   if (cmd_buffer->state.gfx.descriptor_state.push_set.set) {
       vk_free(&cmd_buffer->device->vk.alloc,
-              cmd_buffer->state.gfx.descriptor_state.push_set.set.descriptors);
-   if (cmd_buffer->state.compute.descriptor_state.push_set.set.descriptors)
+              cmd_buffer->state.gfx.descriptor_state.push_set.set);
+   }
+   if (cmd_buffer->state.compute.descriptor_state.push_set.set) {
       vk_free(&cmd_buffer->device->vk.alloc,
-              cmd_buffer->state.compute.descriptor_state.push_set.set.descriptors);
+              cmd_buffer->state.compute.descriptor_state.push_set.set);
+   }
 
    list_for_each_entry_safe(struct v3dv_cmd_buffer_private_obj, pobj,
                             &cmd_buffer->private_objs, list_link) {
@@ -3930,7 +3932,6 @@ v3dv_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
 
 static bool
 v3dv_cmd_buffer_init_push_descriptor_set(struct v3dv_cmd_buffer *cmd_buffer,
-                                          struct v3dv_descriptor_set *set,
                                           struct v3dv_descriptor_set_layout *layout,
                                           VkPipelineBindPoint bind_point)
 {
@@ -3939,27 +3940,30 @@ v3dv_cmd_buffer_init_push_descriptor_set(struct v3dv_cmd_buffer *cmd_buffer,
       &cmd_buffer->state.compute.descriptor_state :
       &cmd_buffer->state.gfx.descriptor_state;
 
-   set->layout = layout;
-
-   if (descriptor_state->push_set.capacity < layout->size) {
-      size_t new_size = MAX2(layout->size, 1024);
+   if (descriptor_state->push_set.capacity < layout->descriptor_count) {
+      size_t new_size = MAX2(layout->descriptor_count, 64);
       new_size = MAX2(new_size, 2 * descriptor_state->push_set.capacity);
       new_size = MIN2(new_size, 96 * MAX_PUSH_DESCRIPTORS);
 
-      void *new_mem = vk_realloc(&cmd_buffer->device->vk.alloc,
-                                 set->descriptors,
-                                 new_size, 8,
-                                 VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-      if (!new_mem) {
+      /* Allocate the descriptor set struct plus space for descriptors */
+      size_t set_size = sizeof(struct v3dv_descriptor_set) +
+                        new_size * sizeof(struct v3dv_descriptor);
+      struct v3dv_descriptor_set *new_set =
+         vk_realloc(&cmd_buffer->device->vk.alloc,
+                    descriptor_state->push_set.set,
+                    set_size, 8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!new_set) {
          descriptor_state->push_set.capacity = 0;
          v3dv_flag_oom(cmd_buffer, NULL);
          return false;
       }
 
-      set->descriptors = new_mem;
+      descriptor_state->push_set.set = new_set;
       descriptor_state->push_set.capacity = new_size;
    }
 
+   descriptor_state->push_set.set->layout = layout;
    return true;
 }
 
@@ -3987,11 +3991,11 @@ v3dv_CmdPushDescriptorSet2KHR(VkCommandBuffer commandBuffer,
       &cmd_buffer->state.compute.descriptor_state :
       &cmd_buffer->state.gfx.descriptor_state;
 
-   struct v3dv_descriptor_set *push_set = &descriptor_state->push_set.set;
-
-   if (!v3dv_cmd_buffer_init_push_descriptor_set(cmd_buffer, push_set,
+   if (!v3dv_cmd_buffer_init_push_descriptor_set(cmd_buffer,
                                                   set_layout, bind_point))
       return;
+
+   struct v3dv_descriptor_set *push_set = descriptor_state->push_set.set;
 
    /* Update the push descriptors */
    VkDevice vk_device = v3dv_device_to_handle(cmd_buffer->device);
