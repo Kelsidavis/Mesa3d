@@ -1030,28 +1030,24 @@ tex_instr_get_and_remove_plane_src(nir_tex_instr *tex)
    return plane;
 }
 
-/* Returns true if we need 32bit, so we know what size to use when we do not
- * have a sampler object
+/*
+ * Traverses a deref chain to compute array indexing information.
+ * Returns the base variable deref and computes the base_index (for constant
+ * indices) and index (for dynamic indices).
  */
-static bool
-lower_tex_src(nir_builder *b,
-              nir_tex_instr *instr,
-              unsigned src_idx,
-              struct lower_pipeline_layout_state *state)
+static nir_deref_instr *
+lower_deref_compute_index(nir_builder *b,
+                          nir_deref_instr *deref,
+                          unsigned *base_index_out,
+                          nir_def **index_out,
+                          unsigned *array_elements_out)
 {
    nir_def *index = NULL;
    unsigned base_index = 0;
    unsigned array_elements = 1;
-   nir_tex_src *src = &instr->src[src_idx];
-   bool is_sampler = src->src_type == nir_tex_src_sampler_deref;
 
-   uint8_t plane = tex_instr_get_and_remove_plane_src(instr);
-
-   /* We compute first the offsets */
-   nir_deref_instr *deref = nir_def_as_deref(src->src.ssa);
    while (deref->deref_type != nir_deref_type_var) {
-      nir_deref_instr *parent =
-         nir_def_as_deref(deref->parent.ssa);
+      nir_deref_instr *parent = nir_def_as_deref(deref->parent.ssa);
 
       assert(deref->deref_type == nir_deref_type_array);
 
@@ -1077,6 +1073,34 @@ lower_tex_src(nir_builder *b,
 
    if (index)
       index = nir_umin(b, index, nir_imm_int(b, array_elements - 1));
+
+   *base_index_out = base_index;
+   *index_out = index;
+   *array_elements_out = array_elements;
+   return deref;
+}
+
+/* Returns true if we need 32bit, so we know what size to use when we do not
+ * have a sampler object
+ */
+static bool
+lower_tex_src(nir_builder *b,
+              nir_tex_instr *instr,
+              unsigned src_idx,
+              struct lower_pipeline_layout_state *state)
+{
+   nir_def *index = NULL;
+   unsigned base_index = 0;
+   unsigned array_elements = 1;
+   nir_tex_src *src = &instr->src[src_idx];
+   bool is_sampler = src->src_type == nir_tex_src_sampler_deref;
+
+   uint8_t plane = tex_instr_get_and_remove_plane_src(instr);
+
+   /* Compute the offsets by traversing the deref chain */
+   nir_deref_instr *deref = nir_def_as_deref(src->src.ssa);
+   deref = lower_deref_compute_index(b, deref, &base_index, &index,
+                                     &array_elements);
 
    /* We have the offsets, we apply them, rewriting the source or removing
     * instr if needed
@@ -1169,7 +1193,6 @@ lower_sampler(nir_builder *b,
    return true;
 }
 
-/* FIXME: really similar to lower_tex_src, perhaps refactor? */
 static void
 lower_image_deref(nir_builder *b,
                   nir_intrinsic_instr *instr,
@@ -1180,34 +1203,8 @@ lower_image_deref(nir_builder *b,
    unsigned array_elements = 1;
    unsigned base_index = 0;
 
-   while (deref->deref_type != nir_deref_type_var) {
-      nir_deref_instr *parent =
-         nir_def_as_deref(deref->parent.ssa);
-
-      assert(deref->deref_type == nir_deref_type_array);
-
-      if (nir_src_is_const(deref->arr.index) && index == NULL) {
-         /* We're still building a direct index */
-         base_index += nir_src_as_uint(deref->arr.index) * array_elements;
-      } else {
-         if (index == NULL) {
-            /* We used to be direct but not anymore */
-            index = nir_imm_int(b, base_index);
-            base_index = 0;
-         }
-
-         index = nir_iadd(b, index,
-                          nir_imul_imm(b, deref->arr.index.ssa,
-                                       array_elements));
-      }
-
-      array_elements *= glsl_get_length(parent->type);
-
-      deref = parent;
-   }
-
-   if (index)
-      nir_umin(b, index, nir_imm_int(b, array_elements - 1));
+   deref = lower_deref_compute_index(b, deref, &base_index, &index,
+                                     &array_elements);
 
    uint32_t set = deref->var->data.descriptor_set;
    uint32_t binding = deref->var->data.binding;
