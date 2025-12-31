@@ -570,11 +570,48 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                  * is gallium's constant buffer 0 in GL and push constants
                  * in Vulkan)).
                  */
-                uint32_t index = nir_src_as_uint(instr->src[0]) + 1;
-                base_offset =
-                        vir_uniform(c, QUNIFORM_UBO_ADDR,
-                                    v3d_unit_data_create(index, const_offset));
-                const_offset = 0;
+                if (nir_src_is_const(instr->src[0])) {
+                        /* Constant buffer index: use direct uniform load */
+                        uint32_t index = nir_src_as_uint(instr->src[0]) + 1;
+                        base_offset =
+                                vir_uniform(c, QUNIFORM_UBO_ADDR,
+                                            v3d_unit_data_create(index, const_offset));
+                        const_offset = 0;
+                } else {
+                        /* Dynamic buffer index: emit conditional selection.
+                         * This handles shader*ArrayDynamicIndexing features.
+                         * We load addresses for all possible UBOs and select
+                         * based on the runtime index value using conditional
+                         * moves instead of branches.
+                         */
+                        struct qreg dynamic_idx = ntq_get_src(c, instr->src[0], 0);
+
+                        /* Start with address 0 (invalid) as default */
+                        base_offset = vir_uniform_ui(c, 0);
+
+                        /* Check up to 32 possible UBO indices.
+                         * This is a reasonable upper bound for dynamic arrays.
+                         */
+                        for (uint32_t i = 1; i <= 32; i++) {
+                                struct qreg this_addr =
+                                        vir_uniform(c, QUNIFORM_UBO_ADDR,
+                                                    v3d_unit_data_create(i, const_offset));
+
+                                /* Compare dynamic_idx with i and set flags */
+                                vir_set_pf(c,
+                                           vir_XOR_dest(c, vir_nop_reg(),
+                                                        dynamic_idx,
+                                                        vir_uniform_ui(c, i)),
+                                           V3D_QPU_PF_PUSHZ);
+
+                                /* If equal (flag A is set), select this_addr,
+                                 * otherwise keep base_offset */
+                                base_offset = vir_MOV(c, vir_SEL(c, V3D_QPU_COND_IFA,
+                                                                 this_addr,
+                                                                 base_offset));
+                        }
+                        const_offset = 0;
+                }
         } else if (is_shared_or_scratch) {
                 /* Shared and scratch variables have no buffer index, and all
                  * start from a common base that we set up at the start of
@@ -594,9 +631,32 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                  */
                 base_offset = vir_uniform_ui(c, 0);
         } else {
+                /* SSBO access */
                 uint32_t idx = is_store ? 1 : 0;
-                base_offset = vir_uniform(c, QUNIFORM_SSBO_OFFSET,
-                                          nir_src_comp_as_uint(instr->src[idx], 0));
+                if (nir_src_is_const(instr->src[idx])) {
+                        /* Constant SSBO index */
+                        base_offset = vir_uniform(c, QUNIFORM_SSBO_OFFSET,
+                                                  nir_src_comp_as_uint(instr->src[idx], 0));
+                } else {
+                        /* Dynamic SSBO index: use same approach as dynamic UBOs */
+                        struct qreg dynamic_idx = ntq_get_src(c, instr->src[idx], 0);
+                        base_offset = vir_uniform_ui(c, 0);
+
+                        for (uint32_t i = 0; i < 32; i++) {
+                                struct qreg this_addr =
+                                        vir_uniform(c, QUNIFORM_SSBO_OFFSET, i);
+
+                                vir_set_pf(c,
+                                           vir_XOR_dest(c, vir_nop_reg(),
+                                                        dynamic_idx,
+                                                        vir_uniform_ui(c, i)),
+                                           V3D_QPU_PF_PUSHZ);
+
+                                base_offset = vir_MOV(c, vir_SEL(c, V3D_QPU_COND_IFA,
+                                                                 this_addr,
+                                                                 base_offset));
+                        }
+                }
         }
 
         /* We are ready to emit TMU register writes now, but before we actually
