@@ -558,9 +558,6 @@ lower_vulkan_resource_index(nir_builder *b,
          pipeline_get_descriptor_map(state->pipeline, binding_layout->type,
                                      b->shader->info.stage, false);
 
-      if (!const_val)
-         UNREACHABLE("non-constant vulkan_resource_index array index");
-
       /* At compile-time we will need to know if we are processing a UBO load
        * for an inline or a regular UBO so we can handle inline loads like
        * push constants. At the level of NIR level however, the inline
@@ -576,12 +573,38 @@ lower_vulkan_resource_index(nir_builder *b,
          start_index += MAX_INLINE_UNIFORM_BUFFERS;
       }
 
-      index = descriptor_map_add(descriptor_map, set, binding,
-                                 const_val->u32,
-                                 binding_layout->array_size,
-                                 start_index,
-                                 true /* sampler_is_32b: doesn't really apply for this case */,
-                                 0);
+      if (const_val) {
+         /* Constant index: use direct mapping (existing behavior) */
+         index = descriptor_map_add(descriptor_map, set, binding,
+                                    const_val->u32,
+                                    binding_layout->array_size,
+                                    start_index,
+                                    true /* sampler_is_32b: doesn't really apply for this case */,
+                                    0);
+      } else {
+         /* Dynamic index: add all descriptors in the array and return
+          * base index. The backend compiler will add the dynamic offset.
+          */
+         uint32_t base_index = UINT32_MAX;
+         for (uint32_t i = 0; i < binding_layout->array_size; i++) {
+            uint32_t desc_index = descriptor_map_add(descriptor_map, set, binding,
+                                                     i, binding_layout->array_size,
+                                                     start_index,
+                                                     true, 0);
+            if (i == 0)
+               base_index = desc_index;
+         }
+         assert(base_index != UINT32_MAX);
+
+         /* Inline uniform blocks don't support dynamic indexing */
+         if (binding_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK)
+            UNREACHABLE("dynamic indexing of inline uniform blocks not supported");
+
+         /* Build the index expression: base_index + dynamic_offset */
+         nir_def *dynamic_index = nir_iadd_imm(b, instr->src[0].ssa, base_index);
+         nir_def_replace(&instr->def, nir_vec2(b, dynamic_index, nir_imm_int(b, 0)));
+         return;
+      }
       break;
    }
 
