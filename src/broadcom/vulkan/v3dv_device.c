@@ -306,9 +306,9 @@ get_features(const struct v3dv_physical_device *physical_device,
       .shaderStorageImageReadWithoutFormat = true,
       .shaderStorageImageWriteWithoutFormat = false,
       .shaderUniformBufferArrayDynamicIndexing = true,
-      .shaderSampledImageArrayDynamicIndexing = false,  /* TODO: implement in backend */
+      .shaderSampledImageArrayDynamicIndexing = true,
       .shaderStorageBufferArrayDynamicIndexing = true,
-      .shaderStorageImageArrayDynamicIndexing = false,  /* TODO: implement in backend */
+      .shaderStorageImageArrayDynamicIndexing = true,
       .shaderClipDistance = true,
       .shaderCullDistance = true,
       .shaderFloat64 = false,
