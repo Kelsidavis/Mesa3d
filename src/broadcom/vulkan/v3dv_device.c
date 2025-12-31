@@ -463,7 +463,7 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_vertex_attribute_divisor */
       .vertexAttributeInstanceRateDivisor = true,
-      .vertexAttributeInstanceRateZeroDivisor = false,
+      .vertexAttributeInstanceRateZeroDivisor = true,
 
       /* VK_KHR_performance_query */
       .performanceCounterQueryPools = physical_device->caps.perfmon,
