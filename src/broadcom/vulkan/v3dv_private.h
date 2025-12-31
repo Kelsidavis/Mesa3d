@@ -588,6 +588,17 @@ struct v3dv_device {
       VkPipeline copy_pipeline[8];
    } queries;
 
+   /* Transform feedback indirect draw resources.
+    *
+    * Used to implement vkCmdDrawIndirectByteCountEXT which reads a byte count
+    * from a buffer and converts it to a vertex count for drawing.
+    */
+   struct {
+      VkDescriptorSetLayout descriptor_set_layout;
+      VkPipelineLayout pipeline_layout;
+      VkPipeline pipeline;
+   } tf_draw;
+
    struct v3dv_pipeline_cache default_pipeline_cache;
 
    /* GL_SHADER_STATE_RECORD needs to specify default attribute values. The

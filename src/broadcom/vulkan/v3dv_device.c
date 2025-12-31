@@ -2044,6 +2044,24 @@ v3dv_DestroyDevice(VkDevice _device,
    v3dv_query_free_resources(device);
 
    destroy_device_meta(device);
+
+   /* Clean up transform feedback draw resources */
+   if (device->tf_draw.pipeline) {
+      v3dv_DestroyPipeline(v3dv_device_to_handle(device),
+                           device->tf_draw.pipeline,
+                           &device->vk.alloc);
+   }
+   if (device->tf_draw.pipeline_layout) {
+      v3dv_DestroyPipelineLayout(v3dv_device_to_handle(device),
+                                 device->tf_draw.pipeline_layout,
+                                 &device->vk.alloc);
+   }
+   if (device->tf_draw.descriptor_set_layout) {
+      v3dv_DestroyDescriptorSetLayout(v3dv_device_to_handle(device),
+                                      device->tf_draw.descriptor_set_layout,
+                                      &device->vk.alloc);
+   }
+
    v3dv_pipeline_cache_finish(&device->default_pipeline_cache);
 
    if (device->default_attribute_float) {
