@@ -3917,6 +3917,37 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                               vir_uniform(c, QUNIFORM_LOGIC_OP_FUNC, 0));
                 break;
 
+        case nir_intrinsic_load_blend_rgb_func_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_RGB_FUNC,
+                                          nir_intrinsic_base(instr)));
+                break;
+        case nir_intrinsic_load_blend_rgb_src_factor_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_RGB_SRC_FACTOR,
+                                          nir_intrinsic_base(instr)));
+                break;
+        case nir_intrinsic_load_blend_rgb_dst_factor_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_RGB_DST_FACTOR,
+                                          nir_intrinsic_base(instr)));
+                break;
+        case nir_intrinsic_load_blend_alpha_func_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_ALPHA_FUNC,
+                                          nir_intrinsic_base(instr)));
+                break;
+        case nir_intrinsic_load_blend_alpha_src_factor_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_ALPHA_SRC_FACTOR,
+                                          nir_intrinsic_base(instr)));
+                break;
+        case nir_intrinsic_load_blend_alpha_dst_factor_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_BLEND_ALPHA_DST_FACTOR,
+                                          nir_intrinsic_base(instr)));
+                break;
+
         case nir_intrinsic_load_sample_id:
                 ntq_store_def(c, &instr->def, 0, vir_SAMPID(c));
                 break;

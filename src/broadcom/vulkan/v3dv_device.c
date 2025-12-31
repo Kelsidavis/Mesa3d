@@ -477,7 +477,7 @@ get_features(const struct v3dv_physical_device *physical_device,
       .extendedDynamicState3ProvokingVertexMode = true,
       .extendedDynamicState3ColorBlendEnable = true,
       .extendedDynamicState3ColorWriteMask = true,
-      .extendedDynamicState3ColorBlendEquation = false, /* requires shader variants */
+      .extendedDynamicState3ColorBlendEquation = true,
       .extendedDynamicState3SampleLocationsEnable = false, /* not supported */
       .extendedDynamicState3SampleMask = true,
       .extendedDynamicState3ConservativeRasterizationMode = false, /* not supported */

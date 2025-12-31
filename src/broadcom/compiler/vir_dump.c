@@ -41,6 +41,12 @@ vir_dump_uniform(enum quniform_contents contents,
                 [QUNIFORM_ALPHA_TO_ONE_ENABLED] = "alpha_to_one_enabled",
                 [QUNIFORM_LOGIC_OP_ENABLED] = "logic_op_enabled",
                 [QUNIFORM_LOGIC_OP_FUNC] = "logic_op_func",
+                [QUNIFORM_BLEND_RGB_FUNC] = "blend_rgb_func",
+                [QUNIFORM_BLEND_RGB_SRC_FACTOR] = "blend_rgb_src_factor",
+                [QUNIFORM_BLEND_RGB_DST_FACTOR] = "blend_rgb_dst_factor",
+                [QUNIFORM_BLEND_ALPHA_FUNC] = "blend_alpha_func",
+                [QUNIFORM_BLEND_ALPHA_SRC_FACTOR] = "blend_alpha_src_factor",
+                [QUNIFORM_BLEND_ALPHA_DST_FACTOR] = "blend_alpha_dst_factor",
         };
 
         switch (contents) {

@@ -327,6 +327,7 @@ struct v3dv_pipeline_key {
    bool sample_alpha_to_one;
    bool software_blend;
    bool dynamic_blend_enables;
+   bool dynamic_blend_equations;
    uint8_t cbufs;
    struct {
       enum pipe_format format;
@@ -2411,6 +2412,9 @@ struct v3dv_pipeline {
 
       /* True if blend enables are dynamic (VK_EXT_extended_dynamic_state3). */
       bool dynamic_blend_enables;
+
+      /* True if blend equations are dynamic (VK_EXT_extended_dynamic_state3). */
+      bool dynamic_blend_equations;
 
       /* True if logic op func is dynamic (VK_EXT_extended_dynamic_state2). */
       bool dynamic_logicop_func;

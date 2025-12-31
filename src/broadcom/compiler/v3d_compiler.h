@@ -392,6 +392,18 @@ enum quniform_contents {
          * Used for VK_EXT_extended_dynamic_state2.
          */
         QUNIFORM_LOGIC_OP_FUNC,
+
+        /**
+         * Dynamic blend equation parameters (per render target).
+         * Data contains the render target index.
+         * Used for VK_EXT_extended_dynamic_state3.
+         */
+        QUNIFORM_BLEND_RGB_FUNC,
+        QUNIFORM_BLEND_RGB_SRC_FACTOR,
+        QUNIFORM_BLEND_RGB_DST_FACTOR,
+        QUNIFORM_BLEND_ALPHA_FUNC,
+        QUNIFORM_BLEND_ALPHA_SRC_FACTOR,
+        QUNIFORM_BLEND_ALPHA_DST_FACTOR,
 };
 
 static inline uint32_t v3d_unit_data_create(uint32_t unit, uint32_t value)
@@ -456,6 +468,7 @@ struct v3d_fs_key {
         bool can_earlyz_with_discard;
         bool software_blend;
         bool dynamic_blend_enables;
+        bool dynamic_blend_equations;
         /* Mask of which color render targets are present. */
         uint8_t cbufs;
         uint8_t swap_color_rb;

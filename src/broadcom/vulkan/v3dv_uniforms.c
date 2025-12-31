@@ -26,6 +26,7 @@
  */
 
 #include "v3dv_private.h"
+#include "vk_blend.h"
 
 /* Our Vulkan resource indices represent indices in descriptor maps which
  * include all shader stages, so we need to size the arrays below
@@ -712,6 +713,72 @@ v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
          cl_aligned_u32(&uniforms,
             job->cmd_buffer->vk.dynamic_graphics_state.cb.logic_op);
          break;
+
+      case QUNIFORM_BLEND_RGB_FUNC: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendOp op = VK_BLEND_OP_ADD;
+         if (rt < dyn->cb.attachment_count)
+            op = dyn->cb.attachments[rt].color_blend_op;
+         cl_aligned_u32(&uniforms, vk_blend_op_to_pipe(op));
+         break;
+      }
+
+      case QUNIFORM_BLEND_RGB_SRC_FACTOR: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendFactor factor = VK_BLEND_FACTOR_ONE;
+         if (rt < dyn->cb.attachment_count)
+            factor = dyn->cb.attachments[rt].src_color_blend_factor;
+         cl_aligned_u32(&uniforms, vk_blend_factor_to_pipe(factor));
+         break;
+      }
+
+      case QUNIFORM_BLEND_RGB_DST_FACTOR: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendFactor factor = VK_BLEND_FACTOR_ZERO;
+         if (rt < dyn->cb.attachment_count)
+            factor = dyn->cb.attachments[rt].dst_color_blend_factor;
+         cl_aligned_u32(&uniforms, vk_blend_factor_to_pipe(factor));
+         break;
+      }
+
+      case QUNIFORM_BLEND_ALPHA_FUNC: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendOp op = VK_BLEND_OP_ADD;
+         if (rt < dyn->cb.attachment_count)
+            op = dyn->cb.attachments[rt].alpha_blend_op;
+         cl_aligned_u32(&uniforms, vk_blend_op_to_pipe(op));
+         break;
+      }
+
+      case QUNIFORM_BLEND_ALPHA_SRC_FACTOR: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendFactor factor = VK_BLEND_FACTOR_ONE;
+         if (rt < dyn->cb.attachment_count)
+            factor = dyn->cb.attachments[rt].src_alpha_blend_factor;
+         cl_aligned_u32(&uniforms, vk_blend_factor_to_pipe(factor));
+         break;
+      }
+
+      case QUNIFORM_BLEND_ALPHA_DST_FACTOR: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendFactor factor = VK_BLEND_FACTOR_ZERO;
+         if (rt < dyn->cb.attachment_count)
+            factor = dyn->cb.attachments[rt].dst_alpha_blend_factor;
+         cl_aligned_u32(&uniforms, vk_blend_factor_to_pipe(factor));
+         break;
+      }
 
       default:
          UNREACHABLE("unsupported quniform_contents uniform type\n");

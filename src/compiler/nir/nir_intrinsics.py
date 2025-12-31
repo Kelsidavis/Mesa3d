@@ -2182,6 +2182,22 @@ intrinsic("load_blend_enabled_v3d", dest_comp=1, bit_sizes=[32],
 intrinsic("load_logic_op_func_v3d", dest_comp=1, bit_sizes=[32],
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# V3D-specific intrinsics for dynamic blend equation (extendedDynamicState3ColorBlendEquation)
+# Render target index is passed as immediate BASE.
+# Returns the PIPE_BLEND_* or PIPE_BLENDFACTOR_* value.
+intrinsic("load_blend_rgb_func_v3d", dest_comp=1, bit_sizes=[32],
+          indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_blend_rgb_src_factor_v3d", dest_comp=1, bit_sizes=[32],
+          indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_blend_rgb_dst_factor_v3d", dest_comp=1, bit_sizes=[32],
+          indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_blend_alpha_func_v3d", dest_comp=1, bit_sizes=[32],
+          indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_blend_alpha_src_factor_v3d", dest_comp=1, bit_sizes=[32],
+          indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+intrinsic("load_blend_alpha_dst_factor_v3d", dest_comp=1, bit_sizes=[32],
+          indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Active invocation index within the subgroup.
 # Equivalent to popcount(ballot(true) & ((1 << subgroup_invocation) - 1))
 intrinsic("load_active_subgroup_invocation_agx", dest_comp=1, flags=[CAN_ELIMINATE])

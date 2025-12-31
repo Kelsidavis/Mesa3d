@@ -1674,6 +1674,7 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
 
    key->software_blend = p_stage->pipeline->blend.use_software;
    key->dynamic_blend_enables = p_stage->pipeline->blend.dynamic_blend_enables;
+   key->dynamic_blend_equations = p_stage->pipeline->blend.dynamic_blend_equations;
    key->dynamic_logicop_func = p_stage->pipeline->blend.dynamic_logicop_func;
 
    for (uint32_t i = 0; i < rendering_info->color_attachment_count; i++) {
@@ -2477,6 +2478,7 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
 
    key->software_blend = pipeline->blend.use_software;
    key->dynamic_blend_enables = pipeline->blend.dynamic_blend_enables;
+   key->dynamic_blend_equations = pipeline->blend.dynamic_blend_equations;
    key->dynamic_logicop_func = pipeline->blend.dynamic_logicop_func;
 
    struct vk_render_pass_state *ri = &pipeline->rendering_info;
@@ -3557,6 +3559,14 @@ pipeline_init(struct v3dv_pipeline *pipeline,
    /* Check if blend enables are dynamic (VK_EXT_extended_dynamic_state3) */
    pipeline->blend.dynamic_blend_enables =
       BITSET_TEST(pipeline_state.dynamic, MESA_VK_DYNAMIC_CB_BLEND_ENABLES);
+
+   /* Check if blend equations are dynamic (VK_EXT_extended_dynamic_state3) */
+   pipeline->blend.dynamic_blend_equations =
+      BITSET_TEST(pipeline_state.dynamic, MESA_VK_DYNAMIC_CB_BLEND_EQUATIONS);
+
+   /* Dynamic blend equations require software blend */
+   if (pipeline->blend.dynamic_blend_equations)
+      pipeline->blend.use_software = true;
 
    /* Check if logic op func is dynamic (VK_EXT_extended_dynamic_state2) */
    pipeline->blend.dynamic_logicop_func =
