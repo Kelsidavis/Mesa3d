@@ -279,6 +279,31 @@ opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 unif = vir_uniform_ui(c, values[0].ui ? __builtin_clz(values[0].ui) : 32);
                 break;
 
+        /* Packing operations */
+        case V3D_QPU_A_VPACK: {
+                /* Pack low 16 bits of each input: result = (a & 0xFFFF) | ((b & 0xFFFF) << 16) */
+                uint32_t result = (values[0].ui & 0xffff) | ((values[1].ui & 0xffff) << 16);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
+
+        case V3D_QPU_A_V8PACK: {
+                /* Pack 4x8 from two inputs containing 2x16 each:
+                 * Takes low 8 bits from each 16-bit half of the inputs.
+                 * src0 = [a1:a0], src1 = [b1:b0] (each 16-bit)
+                 * result = [b1_lo8 : b0_lo8 : a1_lo8 : a0_lo8]
+                 */
+                uint8_t a0 = (values[0].ui >> 0) & 0xff;
+                uint8_t a1 = (values[0].ui >> 16) & 0xff;
+                uint8_t b0 = (values[1].ui >> 0) & 0xff;
+                uint8_t b1 = (values[1].ui >> 16) & 0xff;
+                uint32_t result = a0 | (a1 << 8) | (b0 << 16) | (b1 << 24);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
+
         default:
                 return false;
         }
@@ -351,6 +376,81 @@ opt_constant_mul(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 c->cursor = vir_after_inst(inst);
                 unif = vir_uniform_ui(c, values[0].ui);
                 break;
+
+        /* Normalization operations */
+        case V3D_QPU_M_FTOUNORM16: {
+                /* Float [0.0, 1.0] to u16 [0, 65535] */
+                float clamped = CLAMP(values[0].f, 0.0f, 1.0f);
+                uint16_t result = (uint16_t)(clamped * 65535.0f + 0.5f);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
+
+        case V3D_QPU_M_FTOSNORM16: {
+                /* Float [-1.0, 1.0] to s16 [-32767, 32767] */
+                float clamped = CLAMP(values[0].f, -1.0f, 1.0f);
+                int16_t result = (int16_t)(clamped * 32767.0f + (clamped >= 0 ? 0.5f : -0.5f));
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, (uint32_t)(uint16_t)result);
+                break;
+        }
+
+        case V3D_QPU_M_VFTOUNORM8: {
+                /* f16x2 to u8x2: convert each f16 [0,1] to u8 [0,255] */
+                float lo = _mesa_half_to_float(values[0].ui & 0xffff);
+                float hi = _mesa_half_to_float(values[0].ui >> 16);
+                uint8_t lo_u8 = (uint8_t)(CLAMP(lo, 0.0f, 1.0f) * 255.0f + 0.5f);
+                uint8_t hi_u8 = (uint8_t)(CLAMP(hi, 0.0f, 1.0f) * 255.0f + 0.5f);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, lo_u8 | (hi_u8 << 8));
+                break;
+        }
+
+        case V3D_QPU_M_VFTOSNORM8: {
+                /* f16x2 to s8x2: convert each f16 [-1,1] to s8 [-127,127] */
+                float lo = _mesa_half_to_float(values[0].ui & 0xffff);
+                float hi = _mesa_half_to_float(values[0].ui >> 16);
+                int8_t lo_s8 = (int8_t)(CLAMP(lo, -1.0f, 1.0f) * 127.0f +
+                                        (lo >= 0 ? 0.5f : -0.5f));
+                int8_t hi_s8 = (int8_t)(CLAMP(hi, -1.0f, 1.0f) * 127.0f +
+                                        (hi >= 0 ? 0.5f : -0.5f));
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, (uint8_t)lo_s8 | ((uint8_t)hi_s8 << 8));
+                break;
+        }
+
+        case V3D_QPU_M_FUNPACKUNORMLO: {
+                /* Unpack low byte as unorm to float: u8 [0,255] to [0.0, 1.0] */
+                uint8_t val = values[0].ui & 0xff;
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, (float)val / 255.0f);
+                break;
+        }
+
+        case V3D_QPU_M_FUNPACKUNORMHI: {
+                /* Unpack high byte (byte 1) as unorm to float */
+                uint8_t val = (values[0].ui >> 8) & 0xff;
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, (float)val / 255.0f);
+                break;
+        }
+
+        case V3D_QPU_M_FUNPACKSNORMLO: {
+                /* Unpack low byte as snorm to float: s8 [-127,127] to [-1.0, 1.0] */
+                int8_t val = (int8_t)(values[0].ui & 0xff);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, CLAMP((float)val / 127.0f, -1.0f, 1.0f));
+                break;
+        }
+
+        case V3D_QPU_M_FUNPACKSNORMHI: {
+                /* Unpack high byte (byte 1) as snorm to float */
+                int8_t val = (int8_t)((values[0].ui >> 8) & 0xff);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, CLAMP((float)val / 127.0f, -1.0f, 1.0f));
+                break;
+        }
 
         default:
                 return false;
