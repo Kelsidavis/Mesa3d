@@ -65,7 +65,7 @@ emit_rcl_prologue(struct v3dv_job *job,
 #if V3D_VERSION >= 71
       config.log2_tile_width = log2_tile_size(tiling->tile_width);
       config.log2_tile_height = log2_tile_size(tiling->tile_height);
-      /* FIXME: ideallly we would like next assert on the packet header (as is
+      /* FIXME: ideally we would like next assert on the packet header (as is
        * general, so also applies to GL). We would need to expand
        * gen_pack_header for that.
        */
