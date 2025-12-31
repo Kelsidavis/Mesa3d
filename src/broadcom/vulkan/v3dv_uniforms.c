@@ -384,6 +384,12 @@ get_texture_size_from_image_view(struct v3dv_image_view *image_view,
    case QUNIFORM_TEXTURE_HEIGHT:
       return image_view->vk.extent.height;
    case QUNIFORM_IMAGE_DEPTH:
+      /* For storage images on sliced 3D views (VK_EXT_image_sliced_view_of_3d),
+       * return the sliced count instead of the full extent depth.
+       */
+      if (image_view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D)
+         return image_view->vk.storage.z_slice_count;
+      return image_view->vk.extent.depth;
    case QUNIFORM_TEXTURE_DEPTH:
       return image_view->vk.extent.depth;
    case QUNIFORM_IMAGE_ARRAY_SIZE:

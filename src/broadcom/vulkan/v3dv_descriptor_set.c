@@ -1088,9 +1088,22 @@ write_image_descriptor(struct v3dv_device *device,
 
          void *plane_desc_map = desc_map + offset;
 
-         const uint32_t tex_state_index =
-            iview->vk.view_type != VK_IMAGE_VIEW_TYPE_CUBE_ARRAY ||
-            desc_type != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ? 0 : 1;
+         /* Use texture_shader_state[1] for storage images that need special
+          * handling:
+          * - Cube arrays: layer_count not divided by 6
+          * - Sliced 3D views (VK_EXT_image_sliced_view_of_3d): adjusted base
+          *   pointer and depth
+          */
+         const bool is_sliced_3d =
+            iview->vk.view_type == VK_IMAGE_VIEW_TYPE_3D &&
+            (iview->vk.storage.z_slice_offset != 0 ||
+             iview->vk.storage.z_slice_count != iview->vk.extent.depth);
+
+         const bool use_storage_index =
+            desc_type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE &&
+            (iview->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY || is_sliced_3d);
+
+         const uint32_t tex_state_index = use_storage_index ? 1 : 0;
          memcpy(plane_desc_map,
                 iview->planes[plane].texture_shader_state[tex_state_index],
                 sizeof(iview->planes[plane].texture_shader_state[0]));

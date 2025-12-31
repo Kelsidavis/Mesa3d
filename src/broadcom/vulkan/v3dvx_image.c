@@ -27,16 +27,45 @@
 #include "broadcom/compiler/v3d_compiler.h"
 
 /*
+ * Checks if the image view is a sliced 3D storage view
+ * (VK_EXT_image_sliced_view_of_3d).
+ */
+static inline bool
+image_view_is_sliced_3d(const struct v3dv_image_view *image_view)
+{
+   if (image_view->vk.view_type != VK_IMAGE_VIEW_TYPE_3D)
+      return false;
+
+   /* Check if storage slice parameters differ from the full view extent */
+   return image_view->vk.storage.z_slice_offset != 0 ||
+          image_view->vk.storage.z_slice_count != image_view->vk.extent.depth;
+}
+
+/*
  * Packs and ensure bo for the shader state (the latter can be temporal).
+ *
+ * for_storage_index_1: If true, packs into texture_shader_state[1] with
+ * adjustments for storage image access (cube array layer count or sliced
+ * 3D views).
  */
 static void
 pack_texture_shader_state_helper(struct v3dv_device *device,
                                  struct v3dv_image_view *image_view,
-                                 bool for_cube_map_array_storage)
+                                 bool for_storage_index_1)
 {
-   assert(!for_cube_map_array_storage ||
-          image_view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY);
-   const uint32_t index = for_cube_map_array_storage ? 1 : 0;
+   /* Index 1 is used for:
+    * - Cube array storage (different layer count handling)
+    * - Sliced 3D storage (VK_EXT_image_sliced_view_of_3d)
+    */
+   const bool for_cube_map_array_storage =
+      for_storage_index_1 &&
+      image_view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+   const bool for_sliced_3d_storage =
+      for_storage_index_1 && image_view_is_sliced_3d(image_view);
+
+   assert(!for_storage_index_1 ||
+          for_cube_map_array_storage || for_sliced_3d_storage);
+   const uint32_t index = for_storage_index_1 ? 1 : 0;
 
    assert(image_view->vk.image);
    const struct v3dv_image *image = (struct v3dv_image *) image_view->vk.image;
@@ -79,7 +108,14 @@ pack_texture_shader_state_helper(struct v3dv_device *device,
          tex.texture_type = image_view->format->planes[plane].tex_type;
 
          if (image->vk.image_type == VK_IMAGE_TYPE_3D) {
-            tex.image_depth = image->vk.extent.depth;
+            /* For sliced 3D storage views (VK_EXT_image_sliced_view_of_3d),
+             * use the sliced count instead of the full image depth.
+             */
+            if (for_sliced_3d_storage) {
+               tex.image_depth = image_view->vk.storage.z_slice_count;
+            } else {
+               tex.image_depth = image->vk.extent.depth;
+            }
          } else {
             tex.image_depth = image_view->vk.layer_count;
          }
@@ -113,10 +149,21 @@ pack_texture_shader_state_helper(struct v3dv_device *device,
           * add the bo to the job. This also means that we need to add manually
           * the image bo to the job using the texture.
           */
-         const uint32_t base_offset =
+         uint32_t base_offset =
             image->planes[iplane].mem->bo->offset +
             v3dv_layer_offset(image, 0, image_view->vk.base_array_layer,
                               iplane);
+
+         /* For sliced 3D storage views, offset the base pointer by the
+          * z_slice_offset. v3dv_layer_offset for 3D images uses slice->size
+          * as the stride, so we can use it to calculate the offset.
+          */
+         if (for_sliced_3d_storage && image_view->vk.storage.z_slice_offset > 0) {
+            const struct v3d_resource_slice *slice =
+               &image->planes[iplane].slices[image_view->vk.base_mip_level];
+            base_offset += image_view->vk.storage.z_slice_offset * slice->size;
+         }
+
          tex.texture_base_pointer = v3dv_cl_address(NULL, base_offset);
 
          bool is_srgb = vk_format_is_srgb(image_view->vk.format);
@@ -172,7 +219,13 @@ v3dX(pack_texture_shader_state)(struct v3dv_device *device,
                                 struct v3dv_image_view *iview)
 {
    pack_texture_shader_state_helper(device, iview, false);
-   if (iview->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY)
+
+   /* Pack index 1 for storage images that need special handling:
+    * - Cube arrays need layer_count not divided by 6
+    * - Sliced 3D views need adjusted base pointer and depth
+    */
+   if (iview->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY ||
+       image_view_is_sliced_3d(iview))
       pack_texture_shader_state_helper(device, iview, true);
 }
 
