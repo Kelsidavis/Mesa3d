@@ -174,6 +174,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_maintenance4                     = true,
       .KHR_maintenance5                     = true,
       .KHR_maintenance6                     = true,
+      .KHR_maintenance7                     = true,
       .KHR_map_memory2                      = true,
       .KHR_push_descriptor                  = true,
       .KHR_global_priority                  = true,
@@ -529,6 +530,9 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_maintenance6 */
       .maintenance6 = true,
+
+      /* VK_KHR_maintenance7 */
+      .maintenance7 = true,
 
       /* VK_KHR_push_descriptor */
       .pushDescriptor = true,
@@ -1281,6 +1285,16 @@ get_device_properties(const struct v3dv_physical_device *device,
 
       /* VK_KHR_maintenance6 */
       .maxCombinedImageSamplerDescriptorCount = 1,
+
+      /* VK_KHR_maintenance7 */
+      .robustFragmentShadingRateAttachmentAccess = false,
+      .separateDepthStencilAttachmentAccess = true,
+      .maxDescriptorSetTotalUniformBuffersDynamic = MAX_DYNAMIC_UNIFORM_BUFFERS,
+      .maxDescriptorSetTotalStorageBuffersDynamic = MAX_DYNAMIC_STORAGE_BUFFERS,
+      .maxDescriptorSetTotalBuffersDynamic = MAX_DYNAMIC_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic = MAX_DYNAMIC_UNIFORM_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic = MAX_DYNAMIC_STORAGE_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalBuffersDynamic = MAX_DYNAMIC_BUFFERS,
 
       /* VK_KHR_push_descriptor */
       .maxPushDescriptors = 32,
