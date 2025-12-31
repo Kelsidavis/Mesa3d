@@ -182,6 +182,8 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_push_descriptor                  = true,
       .KHR_global_priority                  = true,
       .KHR_shader_subgroup_rotate           = true,
+      .KHR_shader_subgroup_uniform_control_flow = true,
+      .KHR_shader_maximal_reconvergence     = true,
       .KHR_multiview                        = true,
       .KHR_pipeline_executable_properties   = true,
       .KHR_separate_depth_stencil_layouts   = true,
@@ -555,6 +557,12 @@ get_features(const struct v3dv_physical_device *physical_device,
       /* VK_KHR_shader_subgroup_rotate */
       .shaderSubgroupRotate = true,
       .shaderSubgroupRotateClustered = true,
+
+      /* VK_KHR_shader_subgroup_uniform_control_flow */
+      .shaderSubgroupUniformControlFlow = true,
+
+      /* VK_KHR_shader_maximal_reconvergence */
+      .shaderMaximalReconvergence = true,
 
       /* VK_KHR_shader_float_controls2 */
       .shaderFloatControls2 = true,
