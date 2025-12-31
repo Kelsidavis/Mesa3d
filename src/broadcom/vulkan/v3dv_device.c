@@ -530,8 +530,8 @@ get_features(const struct v3dv_physical_device *physical_device,
       .vertexAttributeInstanceRateZeroDivisor = true,
 
       /* VK_KHR_performance_query */
-      .performanceCounterQueryPools = v3d_has_feature(physical_device, DRM_V3D_PARAM_SUPPORTS_PERFMON),
-      .performanceCounterMultipleQueryPools = false,
+      .performanceCounterQueryPools = physical_device->caps.perfmon,
+      .performanceCounterMultipleQueryPools = physical_device->caps.perfmon,
 
       /* VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
