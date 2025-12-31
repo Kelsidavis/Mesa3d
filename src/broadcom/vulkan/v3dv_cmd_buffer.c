@@ -1910,7 +1910,8 @@ cmd_buffer_emit_non_resolved_ds_aspect_clear(struct v3dv_cmd_buffer *cmd_buffer,
    /* Set up the clear job */
    const VkOffset3D origin = { 0, 0, 0 };
    VkFormat fb_format;
-   if (!v3dv_meta_can_use_tlb(image, 0, 0, &origin, NULL, &fb_format))
+   if (!v3dv_meta_can_use_tlb(&cmd_buffer->device->devinfo,
+                              image, 0, 0, &origin, NULL, &fb_format))
       return;
 
    uint32_t internal_type, internal_bpp;

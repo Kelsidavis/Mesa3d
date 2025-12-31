@@ -383,7 +383,8 @@ get_compatible_tlb_format(VkFormat format)
  * the compatible format will be single-plane.
  */
 bool
-v3dv_meta_can_use_tlb(struct v3dv_image *image,
+v3dv_meta_can_use_tlb(const struct v3d_device_info *devinfo,
+                      struct v3dv_image *image,
                       uint8_t plane,
                       uint8_t miplevel,
                       const VkOffset3D *offset,
@@ -393,34 +394,55 @@ v3dv_meta_can_use_tlb(struct v3dv_image *image,
    if (offset->x != 0 || offset->y != 0)
       return false;
 
-   /* FIXME: this is suboptimal, what we really want to check is that the
-    * extent of the region to copy is the full slice or a multiple of the
-    * tile size.
+   /* Determine the format we'll use for TLB operations */
+   VkFormat fb_format;
+   uint32_t rt_type;
+   if (image->format->planes[plane].rt_type != V3D_OUTPUT_IMAGE_FORMAT_NO) {
+      fb_format = image->planes[plane].vk_format;
+      rt_type = image->format->planes[plane].rt_type;
+   } else {
+      /* Try to find a compatible TLB format */
+      fb_format = get_compatible_tlb_format(image->planes[plane].vk_format);
+      if (fb_format == VK_FORMAT_UNDEFINED)
+         return false;
+      assert(vk_format_get_plane_count(fb_format) == 1);
+      /* Look up the rt_type for the compatible format */
+      const struct v3dv_format *compat = v3d_X(devinfo, get_format)(fb_format);
+      assert(compat && compat->plane_count == 1);
+      rt_type = compat->planes[0].rt_type;
+   }
+
+   /* Check extent alignment: the extent must be either the full slice size
+    * or a multiple of the tile size (since TLB stores write complete tiles).
     */
    if (extent) {
       struct v3d_resource_slice *slice = &image->planes[plane].slices[miplevel];
-      if (slice->width != extent->width || slice->height != extent->height)
-         return false;
-   }
 
-   if (image->format->planes[plane].rt_type != V3D_OUTPUT_IMAGE_FORMAT_NO) {
-      if (compat_format)
-         *compat_format = image->planes[plane].vk_format;
-      return true;
-   }
+      /* Full slice is always allowed */
+      if (slice->width != extent->width || slice->height != extent->height) {
+         /* Check if extent is tile-aligned. Compute tile size based on format
+          * and copy parameters (1 RT, no MSAA, no double buffer).
+          */
+         uint32_t internal_type, internal_bpp;
+         v3d_X(devinfo, get_internal_type_bpp_for_output_format)
+            (rt_type, &internal_type, &internal_bpp);
 
-   /* If the image format is not TLB-supported, then check if we can use
-    * a compatible format instead.
-    */
-   if (compat_format) {
-      *compat_format = get_compatible_tlb_format(image->planes[plane].vk_format);
-      if (*compat_format != VK_FORMAT_UNDEFINED) {
-         assert(vk_format_get_plane_count(*compat_format) == 1);
-         return true;
+         uint32_t total_bpp = 4 * v3d_internal_bpp_words(internal_bpp);
+
+         uint32_t tile_width, tile_height;
+         v3d_choose_tile_size(devinfo, 1, internal_bpp, total_bpp,
+                              false /* msaa */, false /* double_buffer */,
+                              &tile_width, &tile_height);
+
+         if (extent->width % tile_width != 0 || extent->height % tile_height != 0)
+            return false;
       }
    }
 
-   return false;
+   if (compat_format)
+      *compat_format = fb_format;
+
+   return true;
 }
 
 /* Implements a copy using the TLB.
@@ -443,7 +465,8 @@ copy_image_to_buffer_tlb(struct v3dv_cmd_buffer *cmd_buffer,
    uint8_t plane = v3dv_plane_from_aspect(region->imageSubresource.aspectMask);
    assert(plane < image->plane_count);
 
-   if (!v3dv_meta_can_use_tlb(image, plane, region->imageSubresource.mipLevel,
+   if (!v3dv_meta_can_use_tlb(&cmd_buffer->device->devinfo,
+                              image, plane, region->imageSubresource.mipLevel,
                               &region->imageOffset, &region->imageExtent,
                               &fb_format)) {
       return false;
@@ -1309,9 +1332,12 @@ copy_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
    assert(dst_plane < dst->plane_count);
 
    VkFormat fb_format;
-   if (!v3dv_meta_can_use_tlb(src, src_plane, region->srcSubresource.mipLevel,
+   const struct v3d_device_info *devinfo = &cmd_buffer->device->devinfo;
+   if (!v3dv_meta_can_use_tlb(devinfo, src, src_plane,
+                              region->srcSubresource.mipLevel,
                               &region->srcOffset, NULL, &fb_format) ||
-       !v3dv_meta_can_use_tlb(dst, dst_plane, region->dstSubresource.mipLevel,
+       !v3dv_meta_can_use_tlb(devinfo, dst, dst_plane,
+                              region->dstSubresource.mipLevel,
                               &region->dstOffset, &region->extent, &fb_format)) {
       return false;
    }
@@ -1997,7 +2023,8 @@ copy_buffer_to_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
    uint8_t plane = v3dv_plane_from_aspect(region->imageSubresource.aspectMask);
    assert(plane < image->plane_count);
 
-   if (!v3dv_meta_can_use_tlb(image, plane, region->imageSubresource.mipLevel,
+   if (!v3dv_meta_can_use_tlb(&cmd_buffer->device->devinfo,
+                              image, plane, region->imageSubresource.mipLevel,
                               &region->imageOffset, &region->imageExtent,
                               &fb_format)) {
       return false;
@@ -4874,9 +4901,10 @@ resolve_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
    assert(dst->plane_count == 1);
    assert(src->plane_count == 1);
 
-   if (!v3dv_meta_can_use_tlb(src, 0, region->srcSubresource.mipLevel,
+   const struct v3d_device_info *devinfo = &cmd_buffer->device->devinfo;
+   if (!v3dv_meta_can_use_tlb(devinfo, src, 0, region->srcSubresource.mipLevel,
                               &region->srcOffset, NULL, NULL) ||
-       !v3dv_meta_can_use_tlb(dst, 0, region->dstSubresource.mipLevel,
+       !v3dv_meta_can_use_tlb(devinfo, dst, 0, region->dstSubresource.mipLevel,
                               &region->dstOffset, &region->extent, NULL)) {
       return false;
    }

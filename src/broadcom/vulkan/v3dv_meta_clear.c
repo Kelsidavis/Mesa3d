@@ -72,7 +72,8 @@ clear_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
     *   conversion"
     */
    assert(image->plane_count == 1);
-   if (!v3dv_meta_can_use_tlb(image, 0, 0, &origin, NULL, &fb_format))
+   if (!v3dv_meta_can_use_tlb(&cmd_buffer->device->devinfo,
+                              image, 0, 0, &origin, NULL, &fb_format))
       return false;
 
    uint32_t internal_type, internal_bpp;
