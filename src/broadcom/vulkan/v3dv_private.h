@@ -1765,6 +1765,20 @@ struct v3dv_query_pool {
       uint8_t nperfmons;
    } perfmon;
 
+   /* Only used with pipeline statistics queries */
+   struct {
+      /* Which pipeline statistics are being queried */
+      VkQueryPipelineStatisticFlags flags;
+
+      /* Number of statistics being collected (popcount of flags) */
+      uint32_t stat_count;
+
+      /* Indices into the performance counter array for each statistic.
+       * We use perfmon infrastructure to collect the raw data.
+       */
+      uint8_t counter_indices[11]; /* Max 11 pipeline statistics */
+   } pipeline_statistics;
+
    VkQueryType query_type;
    uint32_t query_count;
    struct v3dv_query *queries;

@@ -25,6 +25,79 @@
 
 #include "util/timespec.h"
 #include "compiler/nir/nir_builder.h"
+#include "broadcom/perfcntrs/v3d_perfcntrs.h"
+
+/* Performance counter names used for pipeline statistics.
+ * We use these to look up the counter indices at runtime.
+ */
+static const char *pipeline_stat_counter_names[] = {
+   /* VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT - no direct counter, use 0 */
+   NULL,
+   /* VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT */
+   "PTB-primitives-binned",
+   /* VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT - no direct counter */
+   NULL,
+   /* VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_INVOCATIONS_BIT - not supported */
+   NULL,
+   /* VK_QUERY_PIPELINE_STATISTIC_GEOMETRY_SHADER_PRIMITIVES_BIT - not supported */
+   NULL,
+   /* VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT */
+   "PTB-primitives-binned",
+   /* VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT - primitives after clipping */
+   "PTB-primitives-binned",
+   /* VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT */
+   "FEP-valid-quads",
+   /* VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT - not supported */
+   NULL,
+   /* VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_EVALUATION_SHADER_INVOCATIONS_BIT - not supported */
+   NULL,
+   /* VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT - no direct counter */
+   NULL,
+};
+
+/* Initialize pipeline statistics counter indices for a query pool */
+static bool
+pipeline_statistics_init(struct v3dv_device *device,
+                         struct v3dv_query_pool *pool,
+                         VkQueryPipelineStatisticFlags flags)
+{
+   struct v3d_perfcntrs *perfcntrs = device->pdevice->perfcntr;
+   if (!perfcntrs)
+      return false;
+
+   pool->pipeline_statistics.flags = flags;
+   pool->pipeline_statistics.stat_count = 0;
+
+   /* Map each requested statistic to a performance counter */
+   for (uint32_t i = 0; i < ARRAY_SIZE(pipeline_stat_counter_names); i++) {
+      VkQueryPipelineStatisticFlags bit = 1u << i;
+      if (!(flags & bit))
+         continue;
+
+      const char *counter_name = pipeline_stat_counter_names[i];
+      uint8_t counter_idx = 0;
+
+      if (counter_name) {
+         struct v3d_perfcntr_desc *desc =
+            v3d_perfcntrs_get_by_name(perfcntrs, counter_name);
+         if (desc)
+            counter_idx = desc->index;
+      }
+
+      pool->pipeline_statistics.counter_indices[pool->pipeline_statistics.stat_count++] =
+         counter_idx;
+   }
+
+   /* Set up the perfmon structure to use these counters */
+   pool->perfmon.ncounters = pool->pipeline_statistics.stat_count;
+   for (uint32_t i = 0; i < pool->perfmon.ncounters; i++)
+      pool->perfmon.counters[i] = pool->pipeline_statistics.counter_indices[i];
+
+   pool->perfmon.nperfmons = DIV_ROUND_UP(pool->perfmon.ncounters,
+                                          DRM_V3D_MAX_PERF_COUNTERS);
+
+   return true;
+}
 
 static void
 kperfmon_create(struct v3dv_device *device,
@@ -252,7 +325,8 @@ v3dv_CreateQueryPool(VkDevice _device,
 
    assert(pCreateInfo->queryType == VK_QUERY_TYPE_OCCLUSION ||
           pCreateInfo->queryType == VK_QUERY_TYPE_TIMESTAMP ||
-          pCreateInfo->queryType == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR);
+          pCreateInfo->queryType == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+          pCreateInfo->queryType == VK_QUERY_TYPE_PIPELINE_STATISTICS);
    assert(pCreateInfo->queryCount > 0);
 
    struct v3dv_query_pool *pool =
@@ -330,6 +404,16 @@ v3dv_CreateQueryPool(VkDevice _device,
       }
       break;
    }
+   case VK_QUERY_TYPE_PIPELINE_STATISTICS: {
+      /* Pipeline statistics queries use the perfmon infrastructure */
+      if (!pipeline_statistics_init(device, pool,
+                                    pCreateInfo->pipelineStatistics)) {
+         result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
+         goto fail;
+      }
+      assert(pool->perfmon.nperfmons <= V3DV_MAX_PERFMONS);
+      break;
+   }
    default:
       UNREACHABLE("Unsupported query type");
    }
@@ -352,7 +436,8 @@ v3dv_CreateQueryPool(VkDevice _device,
          if (result != VK_SUCCESS)
             goto fail;
          break;
-      case VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR: {
+      case VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR:
+      case VK_QUERY_TYPE_PIPELINE_STATISTICS: {
          result = vk_sync_create(&device->vk,
                                  &device->pdevice->drm_syncobj_type, 0, 0,
                                  &pool->queries[query_idx].perf.last_job_sync);
@@ -382,7 +467,8 @@ fail:
          vk_sync_destroy(&device->vk, pool->queries[j].timestamp.sync);
    }
 
-   if (pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR) {
+   if (pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+       pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
       for (uint32_t j = 0; j < query_idx; j++)
          vk_sync_destroy(&device->vk, pool->queries[j].perf.last_job_sync);
    }
@@ -421,7 +507,8 @@ v3dv_DestroyQueryPool(VkDevice _device,
          vk_sync_destroy(&device->vk, pool->queries[i].timestamp.sync);
    }
 
-   if (pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR) {
+   if (pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+       pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
       for (uint32_t i = 0; i < pool->query_count; i++) {
          kperfmon_destroy(device, pool, i);
          vk_sync_destroy(&device->vk, pool->queries[i].perf.last_job_sync);
@@ -475,10 +562,11 @@ query_wait_available(struct v3dv_device *device,
       return VK_SUCCESS;
    }
 
-   assert(pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR);
+   assert(pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+          pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS);
 
-   /* For performance queries we need to wait for the queue to signal that
-    * the query has been submitted for execution before anything else.
+   /* For performance/pipeline statistics queries we need to wait for the queue
+    * to signal that the query has been submitted for execution before anything else.
     */
    VkResult result = VK_SUCCESS;
    if (!q->maybe_available) {
@@ -507,10 +595,11 @@ query_wait_available(struct v3dv_device *device,
       if (result != VK_SUCCESS)
          return result;
 
-      /* For performance queries, we also need to wait for the relevant syncobj
-       * to be signaled to ensure completion of the GPU work.
+      /* For performance/pipeline statistics queries, we also need to wait for
+       * the relevant syncobj to be signaled to ensure completion of the GPU work.
        */
-      if (pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR &&
+      if ((pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+           pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) &&
           vk_sync_wait(&device->vk, q->perf.last_job_sync,
                        0, VK_SYNC_WAIT_COMPLETE, UINT64_MAX) != VK_SUCCESS) {
         return vk_device_set_lost(&device->vk, "Query job wait failed");
@@ -547,14 +636,16 @@ query_check_available(struct v3dv_device *device,
    /* For other queries we need to check if the queue has submitted the query
     * for execution at all.
     */
-   assert(pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR);
+   assert(pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+          pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS);
    if (!q->maybe_available)
       return VK_NOT_READY;
 
-   /* For performance queries, we also need to check if the relevant GPU job
-    * has completed.
+   /* For performance/pipeline statistics queries, we also need to check if
+    * the relevant GPU job has completed.
     */
-   if (pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR &&
+   if ((pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+        pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS) &&
        vk_sync_wait(&device->vk, q->perf.last_job_sync,
                     0, VK_SYNC_WAIT_COMPLETE, 0) != VK_SUCCESS) {
          return VK_NOT_READY;
@@ -670,6 +761,65 @@ write_performance_query_result(struct v3dv_device *device,
 }
 
 static VkResult
+write_pipeline_statistics_query_result(struct v3dv_device *device,
+                                       struct v3dv_query_pool *pool,
+                                       uint32_t query,
+                                       bool do_64bit,
+                                       void *data,
+                                       uint32_t slot)
+{
+   assert(pool && pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS);
+
+   struct v3dv_query *q = &pool->queries[query];
+   uint64_t counter_values[V3D_MAX_PERFCNT];
+
+   assert(pool->perfmon.nperfmons);
+   assert(pool->perfmon.ncounters);
+
+   for (uint32_t i = 0; i < pool->perfmon.nperfmons; i++) {
+      struct drm_v3d_perfmon_get_values req = {
+         .id = q->perf.kperfmon_ids[i],
+         .values_ptr = (uintptr_t)(&counter_values[i *
+                                   DRM_V3D_MAX_PERF_COUNTERS])
+      };
+
+      int ret = v3d_ioctl(device->pdevice->render_fd,
+                          DRM_IOCTL_V3D_PERFMON_GET_VALUES,
+                          &req);
+
+      if (ret) {
+         mesa_loge("failed to get perfmon values: %s\n", strerror(errno));
+         return vk_error(device, VK_ERROR_DEVICE_LOST);
+      }
+   }
+
+   /* Write results for each requested pipeline statistic.
+    * For fragment shader invocations, multiply quads by 4 to get pixel count.
+    */
+   VkQueryPipelineStatisticFlags flags = pool->pipeline_statistics.flags;
+   uint32_t stat_idx = 0;
+   for (uint32_t i = 0; i < 11 && flags; i++) {
+      VkQueryPipelineStatisticFlags bit = 1u << i;
+      if (!(flags & bit))
+         continue;
+
+      uint64_t value = counter_values[stat_idx];
+
+      /* For fragment shader invocations, the counter gives us quads,
+       * so multiply by 4 to approximate fragment invocations.
+       */
+      if (bit == VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)
+         value *= 4;
+
+      write_to_buffer(data, slot + stat_idx, do_64bit, value);
+      stat_idx++;
+      flags &= ~bit;
+   }
+
+   return VK_SUCCESS;
+}
+
+static VkResult
 write_query_result(struct v3dv_device *device,
                    struct v3dv_query_pool *pool,
                    uint32_t query,
@@ -687,6 +837,9 @@ write_query_result(struct v3dv_device *device,
    case VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR:
       return write_performance_query_result(device, pool, query, do_64bit,
                                             data, slot);
+   case VK_QUERY_TYPE_PIPELINE_STATISTICS:
+      return write_pipeline_statistics_query_result(device, pool, query, do_64bit,
+                                                    data, slot);
    default:
       UNREACHABLE("Unsupported query type");
    }
@@ -701,6 +854,8 @@ get_query_result_count(struct v3dv_query_pool *pool)
       return 1;
    case VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR:
       return pool->perfmon.ncounters;
+   case VK_QUERY_TYPE_PIPELINE_STATISTICS:
+      return pool->pipeline_statistics.stat_count;
    default:
       UNREACHABLE("Unsupported query type");
    }
@@ -720,7 +875,8 @@ v3dv_get_query_pool_results_cpu(struct v3dv_device *device,
    assert(data);
 
    const bool do_64bit = flags & VK_QUERY_RESULT_64_BIT ||
-      pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR;
+      pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+      pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS;
    const bool do_wait = flags & VK_QUERY_RESULT_WAIT_BIT;
    const bool do_partial = flags & VK_QUERY_RESULT_PARTIAL_BIT;
 
@@ -808,7 +964,8 @@ v3dv_cmd_buffer_emit_set_query_availability(struct v3dv_cmd_buffer *cmd_buffer,
                                             uint8_t availability)
 {
    assert(pool->query_type == VK_QUERY_TYPE_OCCLUSION ||
-          pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR);
+          pool->query_type == VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR ||
+          pool->query_type == VK_QUERY_TYPE_PIPELINE_STATISTICS);
 
    struct v3dv_device *device = cmd_buffer->device;
    VkCommandBuffer vk_cmd_buffer = v3dv_cmd_buffer_to_handle(cmd_buffer);
@@ -1325,6 +1482,7 @@ v3dv_reset_query_pool_cpu(struct v3dv_device *device,
          break;
       }
       case VK_QUERY_TYPE_PERFORMANCE_QUERY_KHR:
+      case VK_QUERY_TYPE_PIPELINE_STATISTICS:
          kperfmon_destroy(device, pool, i);
          kperfmon_create(device, pool, i);
          if (vk_sync_reset(&device->vk, q->perf.last_job_sync) != VK_SUCCESS)
