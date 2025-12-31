@@ -367,14 +367,14 @@ get_features(const struct v3dv_physical_device *physical_device,
       .shaderStorageImageMultisample = false,
       .shaderStorageImageReadWithoutFormat = true,
       .shaderStorageImageWriteWithoutFormat = false,
-      /* Next four features are not actually implemented yet; advertise them
+      .shaderUniformBufferArrayDynamicIndexing = true,
+      .shaderStorageBufferArrayDynamicIndexing = true,
+      /* Next two features are not actually implemented yet; advertise them
        * only under V3D_WEBGPU_OVERRIDE=1 so Dawn/WebGPU setups can claim they
        * are available. Debug build will assert if feature is really used.
        */
-      .shaderUniformBufferArrayDynamicIndexing = webgpu,
-      .shaderSampledImageArrayDynamicIndexing = webgpu,
-      .shaderStorageBufferArrayDynamicIndexing = webgpu,
-      .shaderStorageImageArrayDynamicIndexing = webgpu,
+      .shaderSampledImageArrayDynamicIndexing = webgpu,  /* TODO: implement in backend */
+      .shaderStorageImageArrayDynamicIndexing = webgpu,  /* TODO: implement in backend */
       .shaderClipDistance = true,
       .shaderCullDistance = true,
       .shaderFloat16 = physical_device->devinfo.ver >= 71,
