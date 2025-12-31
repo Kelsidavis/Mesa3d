@@ -4252,10 +4252,6 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
 /* Clears (activates) the execute flags for any channels whose jump target
  * matches this block.
- *
- * XXX perf: Could we be using flpush/flpop somehow for our execution channel
- * enabling?
- *
  */
 static void
 ntq_activate_execute_for_block(struct v3d_compile *c)
@@ -4265,6 +4261,81 @@ ntq_activate_execute_for_block(struct v3d_compile *c)
                    V3D_QPU_PF_PUSHZ);
 
         vir_MOV_cond(c, V3D_QPU_COND_IFA, c->execute, vir_uniform_ui(c, 0));
+}
+
+/**
+ * Check if a control flow list is "simple" for flag stack optimization.
+ * A simple cf_list has no jumps and no nested divergent control flow.
+ */
+static bool
+is_simple_cf_list(struct exec_list *cf_list)
+{
+        foreach_list_typed(nir_cf_node, node, node, cf_list) {
+                switch (node->type) {
+                case nir_cf_node_block: {
+                        nir_block *block = nir_cf_node_as_block(node);
+                        nir_foreach_instr(instr, block) {
+                                if (instr->type == nir_instr_type_jump)
+                                        return false;
+                        }
+                        break;
+                }
+                case nir_cf_node_if: {
+                        nir_if *if_stmt = nir_cf_node_as_if(node);
+                        /* Nested divergent if would need more flag stack depth */
+                        if (nir_src_is_divergent(&if_stmt->condition))
+                                return false;
+                        /* Check nested uniform if blocks too */
+                        if (!is_simple_cf_list(&if_stmt->then_list) ||
+                            !is_simple_cf_list(&if_stmt->else_list))
+                                return false;
+                        break;
+                }
+                case nir_cf_node_loop:
+                        /* Loops are not simple - they have break/continue */
+                        return false;
+                default:
+                        return false;
+                }
+        }
+        return true;
+}
+
+/**
+ * Check if an if statement can use the flag stack optimization.
+ * Requirements:
+ * - Must be first level of non-uniform control flow (from uniform)
+ * - Then and else blocks must be "simple" (no jumps, no nested divergent if)
+ *
+ * TODO: This optimization is currently disabled because using the flag stack
+ * effectively requires changing how stores determine their execution predicate.
+ * Currently, stores check vir_in_nonuniform_control_flow() which looks at
+ * c->execute. To use the flag stack, stores would need to use per-instruction
+ * flag-based predication (IFNA/IFA conditions) instead of checking execute.
+ *
+ * To enable this optimization:
+ * 1. Modify stores to use flag-based predication when in flag-stack mode
+ * 2. Track a "flag_stack_depth" instead of or in addition to execute
+ * 3. Use FLAPUSH at if entry, FLPOP at if exit
+ * 4. For else block, use IFNA (inverted saved condition)
+ */
+static bool
+can_use_flag_stack_for_if(struct v3d_compile *c, nir_if *if_stmt)
+{
+        /* Disabled until the implementation is complete */
+        return false;
+
+        /* Must be coming from uniform control flow */
+        if (vir_in_nonuniform_control_flow(c))
+                return false;
+
+        /* Check that then and else lists are simple */
+        if (!is_simple_cf_list(&if_stmt->then_list))
+                return false;
+        if (!is_simple_cf_list(&if_stmt->else_list))
+                return false;
+
+        return true;
 }
 
 static bool
@@ -4397,6 +4468,107 @@ ntq_emit_uniform_if(struct v3d_compile *c, nir_if *if_stmt)
         vir_set_emit_block(c, after_block);
 }
 
+/**
+ * Emit a simple divergent if/else using the flag stack.
+ *
+ * This is an optimization for simple if/else patterns that don't contain
+ * jumps or nested divergent control flow. We use the hardware flag stack
+ * to save the branch condition, which allows us to restore it at the else
+ * block without needing an XOR comparison.
+ *
+ * Savings: Avoids one XOR instruction at else block entry compared to
+ * ntq_emit_nonuniform_if.
+ *
+ * Note: This optimization is currently experimental. The flag stack behavior
+ * is based on observed patterns and may need adjustment after hardware testing.
+ */
+static void
+ntq_emit_flagstack_if(struct v3d_compile *c, nir_if *if_stmt)
+{
+        nir_block *nir_else_block = nir_if_first_else_block(if_stmt);
+        bool empty_else_block =
+                (nir_else_block == nir_if_last_else_block(if_stmt) &&
+                 exec_list_is_empty(&nir_else_block->instr_list));
+
+        struct qblock *then_block = vir_new_block(c);
+        struct qblock *after_block = vir_new_block(c);
+        struct qblock *else_block;
+        if (empty_else_block)
+                else_block = after_block;
+        else
+                else_block = vir_new_block(c);
+
+        /* We're coming from uniform control flow, set up execute register.
+         * We still need this for stores that check vir_in_nonuniform_control_flow.
+         */
+        c->execute = vir_MOV(c, vir_uniform_ui(c, 0));
+
+        /* Set up the flags for the IF condition (taking the THEN branch). */
+        enum v3d_qpu_cond cond = ntq_emit_bool_to_cond(c, if_stmt->condition);
+
+        /* For lanes taking ELSE, set execute to else_block index */
+        vir_MOV_cond(c, v3d_qpu_cond_invert(cond),
+                     c->execute,
+                     vir_uniform_ui(c, else_block->index));
+
+        /* Set the flags for taking the THEN block (execute == 0) */
+        vir_set_pf(c, vir_MOV_dest(c, vir_nop_reg(), c->execute),
+                   V3D_QPU_PF_PUSHZ);
+
+        /* Jump to ELSE if nothing is active for THEN, otherwise fall through */
+        bool is_cheap = exec_list_is_singular(&if_stmt->then_list) &&
+                        is_cheap_block(nir_if_first_then_block(if_stmt));
+        if (!is_cheap) {
+                vir_BRANCH(c, V3D_QPU_BRANCH_COND_ALLNA);
+                vir_link_blocks(c->cur_block, else_block);
+        }
+        vir_link_blocks(c->cur_block, then_block);
+
+        /* Process the THEN block */
+        vir_set_emit_block(c, then_block);
+        ntq_emit_cf_list(c, &if_stmt->then_list);
+
+        if (!empty_else_block) {
+                /* Update execute for lanes finishing THEN to point to after */
+                vir_set_pf(c, vir_MOV_dest(c, vir_nop_reg(), c->execute),
+                           V3D_QPU_PF_PUSHZ);
+                vir_MOV_cond(c, V3D_QPU_COND_IFA, c->execute,
+                             vir_uniform_ui(c, after_block->index));
+
+                /* Jump to after if all lanes point there */
+                is_cheap = exec_list_is_singular(&if_stmt->else_list) &&
+                           is_cheap_block(nir_else_block);
+                if (!is_cheap) {
+                        vir_set_pf(c, vir_XOR_dest(c, vir_nop_reg(),
+                                                   c->execute,
+                                                   vir_uniform_ui(c, after_block->index)),
+                                   V3D_QPU_PF_PUSHZ);
+                        vir_BRANCH(c, V3D_QPU_BRANCH_COND_ALLA);
+                        vir_link_blocks(c->cur_block, after_block);
+                }
+                vir_link_blocks(c->cur_block, else_block);
+
+                vir_set_emit_block(c, else_block);
+
+                /* Activate ELSE lanes: set execute to 0 for lanes where
+                 * execute == else_block->index.
+                 * This is the standard ntq_activate_execute_for_block logic.
+                 */
+                vir_set_pf(c, vir_XOR_dest(c, vir_nop_reg(),
+                                           c->execute,
+                                           vir_uniform_ui(c, else_block->index)),
+                           V3D_QPU_PF_PUSHZ);
+                vir_MOV_cond(c, V3D_QPU_COND_IFA, c->execute, vir_uniform_ui(c, 0));
+
+                ntq_emit_cf_list(c, &if_stmt->else_list);
+        }
+
+        vir_link_blocks(c->cur_block, after_block);
+
+        vir_set_emit_block(c, after_block);
+        c->execute = c->undef;
+}
+
 static void
 ntq_emit_nonuniform_if(struct v3d_compile *c, nir_if *if_stmt)
 {
@@ -4512,6 +4684,9 @@ ntq_emit_if(struct v3d_compile *c, nir_if *nif)
         if (!vir_in_nonuniform_control_flow(c) &&
             !nir_src_is_divergent(&nif->condition)) {
                 ntq_emit_uniform_if(c, nif);
+        } else if (can_use_flag_stack_for_if(c, nif)) {
+                /* Use flag stack optimization for simple if/else patterns */
+                ntq_emit_flagstack_if(c, nif);
         } else {
                 ntq_emit_nonuniform_if(c, nif);
         }
