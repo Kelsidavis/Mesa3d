@@ -299,6 +299,20 @@ static const struct v3dv_format format_table_ycbcr[] = {
    ),
 };
 
+/* VK_EXT_ycbcr_2plane_444_formats */
+static const struct v3dv_format format_table_ycbcr_2plane_444[] = {
+   YCBCR_FORMAT(G8_B8R8_2PLANE_444_UNORM, false, 2,
+       PLANE(R8, R8, SWIZ(X, 0, 0, 1), 16),
+       PLANE(RG8, RG8, SWIZ(X, Y, 0, 1), 16)
+   ),
+   /* G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16 not supported - no 10-bit formats */
+   /* G12X4_B12X4R12X4_2PLANE_444_UNORM_3PACK16 not supported - no 12-bit formats */
+   YCBCR_FORMAT(G16_B16R16_2PLANE_444_UNORM, false, 2,
+       PLANE(R16UI, R16, SWIZ(X, 0, 0, 1), 16),
+       PLANE(RG16UI, RG16, SWIZ(X, Y, 0, 1), 16)
+   ),
+};
+
 const struct v3dv_format *
 v3dX(get_format)(VkFormat format)
 {
@@ -323,6 +337,11 @@ v3dX(get_format)(VkFormat format)
    case _VK_KHR_maintenance5_number:
       if (enum_offset < ARRAY_SIZE(format_table_maintenance5))
          return &format_table_maintenance5[enum_offset];
+      else
+         return NULL;
+   case _VK_EXT_ycbcr_2plane_444_formats_number:
+      if (enum_offset < ARRAY_SIZE(format_table_ycbcr_2plane_444))
+         return &format_table_ycbcr_2plane_444[enum_offset];
       else
          return NULL;
    default:

@@ -266,6 +266,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_transform_feedback               = true,
       .EXT_vertex_attribute_divisor         = true,
       .EXT_ycbcr_image_arrays               = true,
+      .EXT_ycbcr_2plane_444_formats         = true,
    };
 #if DETECT_OS_ANDROID
    struct u_gralloc *gralloc = vk_android_get_ugralloc();
@@ -652,6 +653,9 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_ycbcr_image_arrays */
       .ycbcrImageArrays = true,
+
+      /* VK_EXT_ycbcr_2plane_444_formats */
+      .ycbcr2plane444Formats = true,
    };
 }
 
