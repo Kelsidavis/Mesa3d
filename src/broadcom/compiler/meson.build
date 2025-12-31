@@ -6,6 +6,7 @@ libbroadcom_compiler_files = files(
   'vir.c',
   'vir_dump.c',
   'vir_live_variables.c',
+  'vir_opt_algebraic.c',
   'vir_opt_coalesce_tmu_write.c',
   'vir_opt_constant_alu.c',
   'vir_opt_constant_propagate.c',
