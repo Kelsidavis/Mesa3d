@@ -277,6 +277,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_host_query_reset                 = true,
       .EXT_image_drm_format_modifier        = true,
       .EXT_image_robustness                 = true,
+      .EXT_image_sliced_view_of_3d          = true,
       .EXT_index_type_uint8                 = true,
       .EXT_legacy_dithering                 = true,
       .EXT_legacy_vertex_attributes         = true,
@@ -603,6 +604,9 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_device_memory_report */
       .deviceMemoryReport = true,
+
+      /* VK_EXT_image_sliced_view_of_3d */
+      .imageSlicedViewOf3D = true,
 
       /* VK_EXT_attachment_feedback_loop_layout */
       .attachmentFeedbackLoopLayout = true,
