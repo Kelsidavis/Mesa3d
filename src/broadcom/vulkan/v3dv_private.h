@@ -321,6 +321,7 @@ struct v3dv_meta_texel_buffer_copy_pipeline {
 struct v3dv_pipeline_key {
    uint8_t topology;
    uint8_t logicop_func;
+   bool dynamic_logicop_func;
    bool msaa;
    bool sample_alpha_to_coverage;
    bool sample_alpha_to_one;
@@ -2410,6 +2411,9 @@ struct v3dv_pipeline {
 
       /* True if blend enables are dynamic (VK_EXT_extended_dynamic_state3). */
       bool dynamic_blend_enables;
+
+      /* True if logic op func is dynamic (VK_EXT_extended_dynamic_state2). */
+      bool dynamic_logicop_func;
 
       /* Per-RT bit mask with blend enables. */
       uint8_t enables;

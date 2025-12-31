@@ -456,10 +456,8 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_extended_dynamic_state2 */
       .extendedDynamicState2 = true,
-      /* We don't support extendedDynamicState2LogicOp as that would require
-       * compile shader variants after the pipeline creation.
-       */
-      .extendedDynamicState2LogicOp = false,
+      /* Dynamic logic op function is supported via runtime uniform. */
+      .extendedDynamicState2LogicOp = true,
       /* We don't support extendedDynamicState2PatchControlPoints as we don't
        * support Tessellation Shaders
        */

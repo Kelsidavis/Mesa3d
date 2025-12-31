@@ -708,6 +708,11 @@ v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
          break;
       }
 
+      case QUNIFORM_LOGIC_OP_FUNC:
+         cl_aligned_u32(&uniforms,
+            job->cmd_buffer->vk.dynamic_graphics_state.cb.logic_op);
+         break;
+
       default:
          UNREACHABLE("unsupported quniform_contents uniform type\n");
       }

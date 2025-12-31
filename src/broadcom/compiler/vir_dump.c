@@ -40,6 +40,7 @@ vir_dump_uniform(enum quniform_contents contents,
                 [QUNIFORM_ALPHA_TO_COVERAGE_ENABLED] = "alpha_to_coverage_enabled",
                 [QUNIFORM_ALPHA_TO_ONE_ENABLED] = "alpha_to_one_enabled",
                 [QUNIFORM_LOGIC_OP_ENABLED] = "logic_op_enabled",
+                [QUNIFORM_LOGIC_OP_FUNC] = "logic_op_func",
         };
 
         switch (contents) {

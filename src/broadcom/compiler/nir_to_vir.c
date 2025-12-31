@@ -3912,6 +3912,11 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                                           nir_intrinsic_base(instr)));
                 break;
 
+        case nir_intrinsic_load_logic_op_func_v3d:
+                ntq_store_def(c, &instr->def, 0,
+                              vir_uniform(c, QUNIFORM_LOGIC_OP_FUNC, 0));
+                break;
+
         case nir_intrinsic_load_sample_id:
                 ntq_store_def(c, &instr->def, 0, vir_SAMPID(c));
                 break;

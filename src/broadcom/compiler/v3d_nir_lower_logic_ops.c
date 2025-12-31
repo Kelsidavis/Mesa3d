@@ -96,6 +96,58 @@ v3d_logicop(nir_builder *b, int logicop_func,
         }
 }
 
+/**
+ * Generate dynamic logic op selection based on runtime uniform.
+ * This generates a chain of conditional selections for all 16 logic ops.
+ */
+static nir_def *
+v3d_logicop_dynamic(nir_builder *b, nir_def *logicop_func,
+                    nir_def *src, nir_def *dst)
+{
+        /* Start with COPY as default (logicop 3) and build up conditionally */
+        nir_def *result = src;
+
+        /* Generate results and select based on logic op function.
+         * We build a chain of bcsel operations.
+         */
+        nir_def *op_clear = nir_imm_int(b, 0);
+        nir_def *op_nor = nir_inot(b, nir_ior(b, src, dst));
+        nir_def *op_and_inv = nir_iand(b, nir_inot(b, src), dst);
+        nir_def *op_copy_inv = nir_inot(b, src);
+        nir_def *op_and_rev = nir_iand(b, src, nir_inot(b, dst));
+        nir_def *op_invert = nir_inot(b, dst);
+        nir_def *op_xor = nir_ixor(b, src, dst);
+        nir_def *op_nand = nir_inot(b, nir_iand(b, src, dst));
+        nir_def *op_and = nir_iand(b, src, dst);
+        nir_def *op_equiv = nir_inot(b, nir_ixor(b, src, dst));
+        nir_def *op_noop = dst;
+        nir_def *op_or_inv = nir_ior(b, nir_inot(b, src), dst);
+        nir_def *op_copy = src;
+        nir_def *op_or_rev = nir_ior(b, src, nir_inot(b, dst));
+        nir_def *op_or = nir_ior(b, src, dst);
+        nir_def *op_set = nir_imm_int(b, ~0);
+
+        /* Build selection chain from high to low op values */
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_SET), op_set, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_OR), op_or, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_OR_REVERSE), op_or_rev, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_COPY), op_copy, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_OR_INVERTED), op_or_inv, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_NOOP), op_noop, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_EQUIV), op_equiv, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_AND), op_and, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_NAND), op_nand, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_XOR), op_xor, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_INVERT), op_invert, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_AND_REVERSE), op_and_rev, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_COPY_INVERTED), op_copy_inv, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_AND_INVERTED), op_and_inv, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_NOR), op_nor, result);
+        result = nir_bcsel(b, nir_ieq_imm(b, logicop_func, PIPE_LOGICOP_CLEAR), op_clear, result);
+
+        return result;
+}
+
 static nir_def *
 v3d_nir_get_swizzled_channel(nir_builder *b, nir_def **srcs, int swiz)
 {
@@ -204,7 +256,7 @@ v3d_get_format_swizzle_for_rt(struct v3d_compile *c, int rt)
 static nir_def *
 v3d_emit_logic_op_raw(struct v3d_compile *c, nir_builder *b,
                       nir_def **src_chans, nir_def **dst_chans,
-                      int rt, int sample)
+                      int rt, int sample, nir_def *dyn_logicop_func)
 {
         const uint8_t *fmt_swz = v3d_get_format_swizzle_for_rt(c, rt);
 
@@ -213,7 +265,10 @@ v3d_emit_logic_op_raw(struct v3d_compile *c, nir_builder *b,
                 nir_def *src = src_chans[i];
                 nir_def *dst =
                         v3d_nir_get_swizzled_channel(b, dst_chans, fmt_swz[i]);
-                op_res[i] = v3d_logicop(b, c->fs_key->logicop_func, src, dst);
+                if (dyn_logicop_func)
+                        op_res[i] = v3d_logicop_dynamic(b, dyn_logicop_func, src, dst);
+                else
+                        op_res[i] = v3d_logicop(b, c->fs_key->logicop_func, src, dst);
 
                 /* We configure our integer RTs to clamp, so we need to ignore
                  * result bits that don't fit in the destination RT component
@@ -240,7 +295,8 @@ static nir_def *
 v3d_emit_logic_op_unorm(struct v3d_compile *c, nir_builder *b,
                         nir_def **src_chans, nir_def **dst_chans,
                         int rt, int sample,
-                        nir_pack_func pack_func, nir_unpack_func unpack_func)
+                        nir_pack_func pack_func, nir_unpack_func unpack_func,
+                        nir_def *dyn_logicop_func)
 {
         static const uint8_t src_swz[4] = { 0, 1, 2, 3 };
         nir_def *packed_src =
@@ -250,15 +306,19 @@ v3d_emit_logic_op_unorm(struct v3d_compile *c, nir_builder *b,
         nir_def *packed_dst =
                 v3d_nir_swizzle_and_pack(b, dst_chans, fmt_swz, pack_func);
 
-        nir_def *packed_result =
-                v3d_logicop(b, c->fs_key->logicop_func, packed_src, packed_dst);
+        nir_def *packed_result;
+        if (dyn_logicop_func)
+                packed_result = v3d_logicop_dynamic(b, dyn_logicop_func, packed_src, packed_dst);
+        else
+                packed_result = v3d_logicop(b, c->fs_key->logicop_func, packed_src, packed_dst);
 
         return v3d_nir_unpack_and_swizzle(b, packed_result, fmt_swz, unpack_func);
 }
 
 static nir_def *
 v3d_nir_emit_logic_op(struct v3d_compile *c, nir_builder *b,
-                      nir_def *src, int rt, int sample)
+                      nir_def *src, int rt, int sample,
+                      nir_def *dyn_logicop_func)
 {
         nir_def *dst = v3d_nir_get_tlb_color(b, c, rt, sample);
 
@@ -271,16 +331,19 @@ v3d_nir_emit_logic_op(struct v3d_compile *c, nir_builder *b,
         if (c->fs_key->color_fmt[rt].format == PIPE_FORMAT_R10G10B10A2_UNORM) {
                 return v3d_emit_logic_op_unorm(
                         c, b, src_chans, dst_chans, rt, 0,
-                        pack_unorm_rgb10a2, unpack_unorm_rgb10a2);
+                        pack_unorm_rgb10a2, unpack_unorm_rgb10a2,
+                        dyn_logicop_func);
         }
 
         if (util_format_is_unorm(c->fs_key->color_fmt[rt].format)) {
                 return v3d_emit_logic_op_unorm(
                         c, b, src_chans, dst_chans, rt, 0,
-                        nir_pack_unorm_4x8, nir_unpack_unorm_4x8);
+                        nir_pack_unorm_4x8, nir_unpack_unorm_4x8,
+                        dyn_logicop_func);
         }
 
-        return v3d_emit_logic_op_raw(c, b, src_chans, dst_chans, rt, 0);
+        return v3d_emit_logic_op_raw(c, b, src_chans, dst_chans, rt, 0,
+                                     dyn_logicop_func);
 }
 
 static void
@@ -296,7 +359,8 @@ v3d_nir_lower_logic_op_instr(struct v3d_compile *c,
                              nir_builder *b,
                              nir_intrinsic_instr *intr,
                              int rt,
-                             nir_def *dyn_enable)
+                             nir_def *dyn_enable,
+                             nir_def *dyn_logicop_func)
 {
         nir_def *frag_color = intr->src[0].ssa;
 
@@ -309,7 +373,8 @@ v3d_nir_lower_logic_op_instr(struct v3d_compile *c,
                 nir_alu_type type = nir_intrinsic_src_type(intr);
                 for (int i = 0; i < V3D_MAX_SAMPLES; i++) {
                         nir_def *logicop_result =
-                                v3d_nir_emit_logic_op(c, b, frag_color, rt, i);
+                                v3d_nir_emit_logic_op(c, b, frag_color, rt, i,
+                                                      dyn_logicop_func);
 
                         /* For dynamic LogicOpEnable, conditionally use
                          * the logic op result or the original color.
@@ -324,7 +389,8 @@ v3d_nir_lower_logic_op_instr(struct v3d_compile *c,
                 nir_instr_remove(&intr->instr);
         } else {
                 nir_def *logicop_result =
-                        v3d_nir_emit_logic_op(c, b, frag_color, rt, 0);
+                        v3d_nir_emit_logic_op(c, b, frag_color, rt, 0,
+                                              dyn_logicop_func);
 
                 /* For dynamic LogicOpEnable, conditionally use
                  * the logic op result or the original color.
@@ -340,7 +406,7 @@ v3d_nir_lower_logic_op_instr(struct v3d_compile *c,
 
 static bool
 v3d_nir_lower_logic_ops_block(nir_block *block, struct v3d_compile *c,
-                              nir_def *dyn_enable)
+                              nir_def *dyn_enable, nir_def *dyn_logicop_func)
 {
         bool progress = false;
 
@@ -381,7 +447,8 @@ v3d_nir_lower_logic_ops_block(nir_block *block, struct v3d_compile *c,
                         }
 
                         nir_builder b = nir_builder_at(nir_before_instr(&intr->instr));
-                        v3d_nir_lower_logic_op_instr(c, &b, intr, rt, dyn_enable);
+                        v3d_nir_lower_logic_op_instr(c, &b, intr, rt, dyn_enable,
+                                                     dyn_logicop_func);
 
                         progress = true;
                 }
@@ -398,12 +465,20 @@ v3d_nir_lower_logic_ops(nir_shader *s, struct v3d_compile *c)
         /* Nothing to do if logic op is 'copy src to dst' or if logic ops are
          * disabled (we set the logic op to copy in that case).
          */
-        if (c->fs_key->logicop_func == PIPE_LOGICOP_COPY)
+        if (c->fs_key->logicop_func == PIPE_LOGICOP_COPY &&
+            !c->fs_key->dynamic_logicop_func)
                 return false;
 
         nir_foreach_function_impl(impl, s) {
+                nir_def *dyn_logicop_func = NULL;
+                if (c->fs_key->dynamic_logicop_func) {
+                        nir_builder b = nir_builder_at(nir_before_impl(impl));
+                        dyn_logicop_func = nir_load_logic_op_func_v3d(&b);
+                }
+
                 nir_foreach_block(block, impl)
-                        progress |= v3d_nir_lower_logic_ops_block(block, c, NULL);
+                        progress |= v3d_nir_lower_logic_ops_block(block, c, NULL,
+                                                                  dyn_logicop_func);
 
                 nir_progress(progress, impl, nir_metadata_control_flow);
         }
@@ -418,14 +493,23 @@ v3d_nir_lower_logic_ops_dynamic(nir_shader *s, struct v3d_compile *c,
         bool progress = false;
 
         /* For dynamic logic ops, we still need a non-COPY logic op in the key
-         * to know which operation to perform when enabled.
+         * to know which operation to perform when enabled (unless dynamic func
+         * is also enabled).
          */
-        if (c->fs_key->logicop_func == PIPE_LOGICOP_COPY)
+        if (c->fs_key->logicop_func == PIPE_LOGICOP_COPY &&
+            !c->fs_key->dynamic_logicop_func)
                 return false;
 
         nir_foreach_function_impl(impl, s) {
+                nir_def *dyn_logicop_func = NULL;
+                if (c->fs_key->dynamic_logicop_func) {
+                        nir_builder b = nir_builder_at(nir_before_impl(impl));
+                        dyn_logicop_func = nir_load_logic_op_func_v3d(&b);
+                }
+
                 nir_foreach_block(block, impl)
-                        progress |= v3d_nir_lower_logic_ops_block(block, c, dyn_enable);
+                        progress |= v3d_nir_lower_logic_ops_block(block, c, dyn_enable,
+                                                                  dyn_logicop_func);
 
                 nir_progress(progress, impl, nir_metadata_control_flow);
         }

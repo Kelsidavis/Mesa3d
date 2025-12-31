@@ -2177,6 +2177,11 @@ intrinsic("load_logic_op_enabled_v3d", dest_comp=1, bit_sizes=[32],
 intrinsic("load_blend_enabled_v3d", dest_comp=1, bit_sizes=[32],
           indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# V3D-specific intrinsic for dynamic logic op function (extendedDynamicState2LogicOp)
+# Returns the PIPE_LOGICOP_* value (0-15).
+intrinsic("load_logic_op_func_v3d", dest_comp=1, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Active invocation index within the subgroup.
 # Equivalent to popcount(ballot(true) & ((1 << subgroup_invocation) - 1))
 intrinsic("load_active_subgroup_invocation_agx", dest_comp=1, flags=[CAN_ELIMINATE])

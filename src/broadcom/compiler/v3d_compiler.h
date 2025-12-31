@@ -386,6 +386,12 @@ enum quniform_contents {
          * Used for VK_EXT_extended_dynamic_state3.
          */
         QUNIFORM_BLEND_ENABLED,
+
+        /**
+         * Dynamic logic op function.
+         * Used for VK_EXT_extended_dynamic_state2.
+         */
+        QUNIFORM_LOGIC_OP_FUNC,
 };
 
 static inline uint32_t v3d_unit_data_create(uint32_t unit, uint32_t value)
@@ -485,6 +491,7 @@ struct v3d_fs_key {
         } blend[V3D_MAX_DRAW_BUFFERS];
 
         enum pipe_logicop logicop_func;
+        bool dynamic_logicop_func;
         uint32_t point_sprite_mask;
 
         /* If the fragment shader reads gl_PrimitiveID then we have 2 scenarios:
