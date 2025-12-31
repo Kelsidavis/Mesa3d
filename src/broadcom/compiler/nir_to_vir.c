@@ -4729,11 +4729,15 @@ ntq_emit_loop(struct v3d_compile *c, nir_loop *loop)
         struct qblock *save_loop_cont_block = c->loop_cont_block;
         struct qblock *save_loop_break_block = c->loop_break_block;
 
+        c->current_loop_depth++;
+
         if (vir_in_nonuniform_control_flow(c) || nir_loop_is_divergent(loop)) {
                 ntq_emit_nonuniform_loop(c, loop);
         } else {
                 ntq_emit_uniform_loop(c, loop);
         }
+
+        c->current_loop_depth--;
 
         c->loop_break_block = save_loop_break_block;
         c->loop_cont_block = save_loop_cont_block;

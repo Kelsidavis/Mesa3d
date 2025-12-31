@@ -461,6 +461,7 @@ vir_new_block(struct v3d_compile *c)
                                                _mesa_key_pointer_equal);
 
         block->index = c->next_block_index++;
+        block->loop_depth = c->current_loop_depth;
 
         return block;
 }

@@ -270,7 +270,6 @@ v3d_choose_spill_node(struct v3d_compile *c)
         assert(c->num_temps > 1);
 
         const float tmu_scale = 10;
-        float block_scale = 1.0;
         float spill_costs[c->num_temps];
         bool in_tmu_operation = false;
         bool rtop_hazard = false;
@@ -279,8 +278,16 @@ v3d_choose_spill_node(struct v3d_compile *c)
         for (unsigned i = 0; i < c->num_temps; i++)
                 spill_costs[i] = 0.0;
 
-        /* XXX: Scale the cost up when inside of a loop. */
         vir_for_each_block(block, c) {
+                /* Scale the spill cost up when inside of a loop. Each loop
+                 * nesting level multiplies the cost by 10, assuming a typical
+                 * loop iteration count of ~10. This makes the register
+                 * allocator prefer to spill variables outside of loops.
+                 */
+                float block_scale = 1.0f;
+                for (uint8_t d = 0; d < block->loop_depth; d++)
+                        block_scale *= 10.0f;
+
                 vir_for_each_inst(inst, block) {
                         /* RTOP is not preserved across thread switches, so
                          * we can't spill in the middle of multop + umul24.
