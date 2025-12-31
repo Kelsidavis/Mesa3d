@@ -168,6 +168,56 @@ opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 break;
         }
 
+        /* Vectorized half-precision operations (f16x2) */
+        case V3D_QPU_A_VADD: {
+                /* Unpack f16x2 values, add, and repack */
+                float a_lo = _mesa_half_to_float(values[0].ui & 0xffff);
+                float a_hi = _mesa_half_to_float(values[0].ui >> 16);
+                float b_lo = _mesa_half_to_float(values[1].ui & 0xffff);
+                float b_hi = _mesa_half_to_float(values[1].ui >> 16);
+                uint32_t result = ((uint32_t)_mesa_float_to_half(a_hi + b_hi) << 16) |
+                                  _mesa_float_to_half(a_lo + b_lo);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
+
+        case V3D_QPU_A_VSUB: {
+                float a_lo = _mesa_half_to_float(values[0].ui & 0xffff);
+                float a_hi = _mesa_half_to_float(values[0].ui >> 16);
+                float b_lo = _mesa_half_to_float(values[1].ui & 0xffff);
+                float b_hi = _mesa_half_to_float(values[1].ui >> 16);
+                uint32_t result = ((uint32_t)_mesa_float_to_half(a_hi - b_hi) << 16) |
+                                  _mesa_float_to_half(a_lo - b_lo);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
+
+        case V3D_QPU_A_VFMIN: {
+                float a_lo = _mesa_half_to_float(values[0].ui & 0xffff);
+                float a_hi = _mesa_half_to_float(values[0].ui >> 16);
+                float b_lo = _mesa_half_to_float(values[1].ui & 0xffff);
+                float b_hi = _mesa_half_to_float(values[1].ui >> 16);
+                uint32_t result = ((uint32_t)_mesa_float_to_half(fminf(a_hi, b_hi)) << 16) |
+                                  _mesa_float_to_half(fminf(a_lo, b_lo));
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
+
+        case V3D_QPU_A_VFMAX: {
+                float a_lo = _mesa_half_to_float(values[0].ui & 0xffff);
+                float a_hi = _mesa_half_to_float(values[0].ui >> 16);
+                float b_lo = _mesa_half_to_float(values[1].ui & 0xffff);
+                float b_hi = _mesa_half_to_float(values[1].ui >> 16);
+                uint32_t result = ((uint32_t)_mesa_float_to_half(fmaxf(a_hi, b_hi)) << 16) |
+                                  _mesa_float_to_half(fmaxf(a_lo, b_lo));
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
+
         /* Unary operations */
         case V3D_QPU_A_NOT:
                 c->cursor = vir_after_inst(inst);
