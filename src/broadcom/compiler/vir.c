@@ -3028,8 +3028,8 @@ vir_optimize(struct v3d_compile *c)
                 OPTPASS(vir_opt_copy_propagate);
                 OPTPASS(vir_opt_redundant_flags);
                 OPTPASS(vir_opt_dead_code);
-                OPTPASS(vir_opt_small_immediates);
                 OPTPASS(vir_opt_constant_alu);
+                OPTPASS(vir_opt_small_immediates);
                 OPTPASS(vir_opt_alu);
                 OPTPASS(vir_opt_redundant_setnnmode);
                 OPTPASS(vir_opt_coalesce_tmu_write);
