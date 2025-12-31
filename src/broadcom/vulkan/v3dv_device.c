@@ -466,7 +466,7 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_performance_query */
       .performanceCounterQueryPools = physical_device->caps.perfmon,
-      .performanceCounterMultipleQueryPools = false,
+      .performanceCounterMultipleQueryPools = physical_device->caps.perfmon,
 
       /* VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
