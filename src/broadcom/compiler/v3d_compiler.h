@@ -511,6 +511,12 @@ struct qblock {
 
         int index;
 
+        /* Loop nesting depth for this block, used for register allocation
+         * to scale spill costs (variables in inner loops are more expensive
+         * to spill).
+         */
+        uint8_t loop_depth;
+
         /* Instruction IPs for the first and last instruction of the block.
          * Set by qpu_schedule.c.
          */
@@ -851,6 +857,9 @@ struct v3d_compile {
          */
         struct qinst *restore_last_thrsw;
         bool restore_scoreboard_lock;
+
+        /* Current loop nesting depth during NIR to VIR translation */
+        uint8_t current_loop_depth;
 
         /* Whether we are in the process of spilling registers for
          * register allocation
