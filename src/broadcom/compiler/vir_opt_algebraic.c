@@ -213,6 +213,13 @@ try_opt_algebraic_add(struct v3d_compile *c, struct qinst *inst)
                         replace_with_mov(c, inst, inst->src[0]);
                         return true;
                 }
+                /* SUB x, x → 0 */
+                if (inst->src[0].file == QFILE_TEMP &&
+                    inst->src[1].file == QFILE_TEMP &&
+                    inst->src[0].index == inst->src[1].index) {
+                        replace_with_const(c, inst, 0);
+                        return true;
+                }
                 break;
 
         case V3D_QPU_A_FSUB:
@@ -238,6 +245,13 @@ try_opt_algebraic_add(struct v3d_compile *c, struct qinst *inst)
                         replace_with_mov(c, inst, inst->src[1]);
                         return true;
                 }
+                /* AND x, x → MOV x */
+                if (inst->src[0].file == QFILE_TEMP &&
+                    inst->src[1].file == QFILE_TEMP &&
+                    inst->src[0].index == inst->src[1].index) {
+                        replace_with_mov(c, inst, inst->src[0]);
+                        return true;
+                }
                 break;
 
         case V3D_QPU_A_OR:
@@ -256,6 +270,13 @@ try_opt_algebraic_add(struct v3d_compile *c, struct qinst *inst)
                         replace_with_const(c, inst, 0xFFFFFFFF);
                         return true;
                 }
+                /* OR x, x → MOV x */
+                if (inst->src[0].file == QFILE_TEMP &&
+                    inst->src[1].file == QFILE_TEMP &&
+                    inst->src[0].index == inst->src[1].index) {
+                        replace_with_mov(c, inst, inst->src[0]);
+                        return true;
+                }
                 break;
 
         case V3D_QPU_A_XOR:
@@ -266,6 +287,13 @@ try_opt_algebraic_add(struct v3d_compile *c, struct qinst *inst)
                 }
                 if (has_const0 && val0 == 0) {
                         replace_with_mov(c, inst, inst->src[1]);
+                        return true;
+                }
+                /* XOR x, x → 0 */
+                if (inst->src[0].file == QFILE_TEMP &&
+                    inst->src[1].file == QFILE_TEMP &&
+                    inst->src[0].index == inst->src[1].index) {
+                        replace_with_const(c, inst, 0);
                         return true;
                 }
                 break;
@@ -300,6 +328,38 @@ try_opt_algebraic_add(struct v3d_compile *c, struct qinst *inst)
                     inst->src[0].index == inst->src[1].index) {
                         replace_with_mov(c, inst, inst->src[0]);
                         return true;
+                }
+                break;
+
+        case V3D_QPU_A_NOT:
+                /* NOT(NOT x) → MOV x */
+                if (inst->src[0].file == QFILE_TEMP) {
+                        struct qinst *src_def = c->defs[inst->src[0].index];
+                        if (src_def &&
+                            src_def->qpu.type == V3D_QPU_INSTR_TYPE_ALU &&
+                            vir_is_add(src_def) &&
+                            src_def->qpu.alu.add.op == V3D_QPU_A_NOT &&
+                            src_def->qpu.alu.add.output_pack == V3D_QPU_PACK_NONE &&
+                            src_def->qpu.alu.add.a.unpack == V3D_QPU_UNPACK_NONE) {
+                                replace_with_mov(c, inst, src_def->src[0]);
+                                return true;
+                        }
+                }
+                break;
+
+        case V3D_QPU_A_NEG:
+                /* NEG(NEG x) → MOV x */
+                if (inst->src[0].file == QFILE_TEMP) {
+                        struct qinst *src_def = c->defs[inst->src[0].index];
+                        if (src_def &&
+                            src_def->qpu.type == V3D_QPU_INSTR_TYPE_ALU &&
+                            vir_is_add(src_def) &&
+                            src_def->qpu.alu.add.op == V3D_QPU_A_NEG &&
+                            src_def->qpu.alu.add.output_pack == V3D_QPU_PACK_NONE &&
+                            src_def->qpu.alu.add.a.unpack == V3D_QPU_UNPACK_NONE) {
+                                replace_with_mov(c, inst, src_def->src[0]);
+                                return true;
+                        }
                 }
                 break;
 
