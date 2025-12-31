@@ -304,6 +304,49 @@ opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 break;
         }
 
+        /* SFU operations - transcendental functions */
+        case V3D_QPU_A_RECIP:
+                /* 1.0 / x */
+                if (values[0].f != 0.0f) {
+                        c->cursor = vir_after_inst(inst);
+                        unif = vir_uniform_f(c, 1.0f / values[0].f);
+                } else {
+                        return false;
+                }
+                break;
+
+        case V3D_QPU_A_RSQRT:
+                /* 1.0 / sqrt(x) */
+                if (values[0].f > 0.0f) {
+                        c->cursor = vir_after_inst(inst);
+                        unif = vir_uniform_f(c, 1.0f / sqrtf(values[0].f));
+                } else {
+                        return false;
+                }
+                break;
+
+        case V3D_QPU_A_EXP:
+                /* 2^x (base 2 exponential) */
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, exp2f(values[0].f));
+                break;
+
+        case V3D_QPU_A_LOG:
+                /* log2(x) (base 2 logarithm) */
+                if (values[0].f > 0.0f) {
+                        c->cursor = vir_after_inst(inst);
+                        unif = vir_uniform_f(c, log2f(values[0].f));
+                } else {
+                        return false;
+                }
+                break;
+
+        case V3D_QPU_A_SIN:
+                /* sin(x * 2 * pi) - input is in revolutions, not radians */
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, sinf(values[0].f * 2.0f * M_PI));
+                break;
+
         default:
                 return false;
         }
