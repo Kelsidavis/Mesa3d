@@ -177,6 +177,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_maintenance7                     = true,
       .KHR_maintenance8                     = true,
       .KHR_maintenance9                     = true,
+      .KHR_maintenance10                    = true,
       .KHR_map_memory2                      = true,
       .KHR_push_descriptor                  = true,
       .KHR_global_priority                  = true,
@@ -541,6 +542,9 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_maintenance9 */
       .maintenance9 = true,
+
+      /* VK_KHR_maintenance10 */
+      .maintenance10 = true,
 
       /* VK_KHR_push_descriptor */
       .pushDescriptor = true,
@@ -1307,6 +1311,11 @@ get_device_properties(const struct v3dv_physical_device *device,
       /* VK_KHR_maintenance9 */
       .image2DViewOf3DSparse = false,
       .defaultVertexAttributeValue = VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ONE_KHR,
+
+      /* VK_KHR_maintenance10 */
+      .rgba4OpaqueBlackSwizzled = true,
+      .resolveSrgbFormatAppliesTransferFunction = true,
+      .resolveSrgbFormatSupportsTransferFunctionControl = false,
 
       /* VK_KHR_push_descriptor */
       .maxPushDescriptors = 32,
