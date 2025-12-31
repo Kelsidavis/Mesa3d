@@ -328,6 +328,13 @@ enum quniform_contents {
          * Used for VK_EXT_extended_dynamic_state3.
          */
         QUNIFORM_LOGIC_OP_ENABLED,
+
+        /**
+         * Dynamic blend enable flag (per render target).
+         * Data contains the render target index.
+         * Used for VK_EXT_extended_dynamic_state3.
+         */
+        QUNIFORM_BLEND_ENABLED,
 };
 
 static inline uint32_t v3d_unit_data_create(uint32_t unit, uint32_t value)
@@ -394,6 +401,7 @@ struct v3d_fs_key {
         bool can_earlyz_with_discard;
         bool software_blend;
         bool ignore_sample_mask;
+        bool dynamic_blend_enables;
         /* Mask of which color render targets are present. */
         uint8_t cbufs;
         uint8_t swap_color_rb;
