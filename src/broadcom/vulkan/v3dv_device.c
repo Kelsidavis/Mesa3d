@@ -229,6 +229,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_inline_uniform_block             = true,
       .EXT_extended_dynamic_state           = true,
       .EXT_extended_dynamic_state2          = true,
+      .EXT_extended_dynamic_state3          = true,
       .EXT_external_memory_dma_buf          = true,
       .EXT_external_memory_acquire_unmodified = true,
       .EXT_global_priority                  = true,
@@ -462,6 +463,39 @@ get_features(const struct v3dv_physical_device *physical_device,
        * support Tessellation Shaders
        */
       .extendedDynamicState2PatchControlPoints = false,
+
+      /* VK_EXT_extended_dynamic_state3 */
+      .extendedDynamicState3PolygonMode = true,
+      .extendedDynamicState3TessellationDomainOrigin = false, /* no tessellation */
+      .extendedDynamicState3RasterizationStream = false, /* no geometry shaders */
+      .extendedDynamicState3LineStippleEnable = false, /* no stipple support */
+      .extendedDynamicState3LineRasterizationMode = true,
+      .extendedDynamicState3LogicOpEnable = false, /* requires shader variants */
+      .extendedDynamicState3AlphaToOneEnable = false, /* requires shader changes */
+      .extendedDynamicState3DepthClipEnable = physical_device->devinfo.ver >= 71,
+      .extendedDynamicState3DepthClampEnable = physical_device->devinfo.ver >= 71,
+      .extendedDynamicState3DepthClipNegativeOneToOne = physical_device->devinfo.ver >= 71,
+      .extendedDynamicState3ProvokingVertexMode = true,
+      .extendedDynamicState3ColorBlendEnable = false, /* requires shader variants */
+      .extendedDynamicState3ColorWriteMask = false, /* requires shader variants */
+      .extendedDynamicState3ColorBlendEquation = false, /* requires shader variants */
+      .extendedDynamicState3SampleLocationsEnable = false, /* not supported */
+      .extendedDynamicState3SampleMask = true,
+      .extendedDynamicState3ConservativeRasterizationMode = false, /* not supported */
+      .extendedDynamicState3AlphaToCoverageEnable = false, /* requires shader changes */
+      .extendedDynamicState3RasterizationSamples = false, /* complex, affects shaders */
+      .extendedDynamicState3ExtraPrimitiveOverestimationSize = false,
+      .extendedDynamicState3ViewportWScalingEnable = false,
+      .extendedDynamicState3ViewportSwizzle = false,
+      .extendedDynamicState3ShadingRateImageEnable = false,
+      .extendedDynamicState3CoverageToColorEnable = false,
+      .extendedDynamicState3CoverageToColorLocation = false,
+      .extendedDynamicState3CoverageModulationMode = false,
+      .extendedDynamicState3CoverageModulationTableEnable = false,
+      .extendedDynamicState3CoverageModulationTable = false,
+      .extendedDynamicState3CoverageReductionMode = false,
+      .extendedDynamicState3RepresentativeFragmentTestEnable = false,
+      .extendedDynamicState3ColorBlendAdvanced = false,
 
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,

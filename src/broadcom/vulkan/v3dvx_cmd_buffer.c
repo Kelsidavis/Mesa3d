@@ -1601,13 +1601,19 @@ v3dX(cmd_buffer_emit_sample_state)(struct v3dv_cmd_buffer *cmd_buffer)
    struct v3dv_job *job = cmd_buffer->state.job;
    assert(job);
 
+   struct vk_dynamic_graphics_state *dyn =
+      &cmd_buffer->vk.dynamic_graphics_state;
+
    v3dv_cl_ensure_space_with_branch(&job->bcl, cl_packet_length(SAMPLE_STATE));
    v3dv_return_if_oom(cmd_buffer, NULL);
 
    cl_emit(&job->bcl, SAMPLE_STATE, state) {
       state.coverage = 1.0f;
-      state.mask = pipeline->sample_mask;
+      /* VK_EXT_extended_dynamic_state3: dynamic sample mask */
+      state.mask = dyn->ms.sample_mask & 0xf;
    }
+
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_MS_SAMPLE_MASK);
 }
 
 void
@@ -2050,6 +2056,31 @@ v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
          config.clockwise_primitives = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE;
       }
 
+      /* VK_EXT_extended_dynamic_state3: polygon mode */
+      if (dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL) {
+         config.direct3d_wireframe_triangles_mode = true;
+         config.direct3d_point_fill_mode =
+            dyn->rs.polygon_mode == VK_POLYGON_MODE_POINT;
+      } else {
+         config.direct3d_wireframe_triangles_mode = false;
+         config.direct3d_point_fill_mode = false;
+      }
+
+      /* VK_EXT_extended_dynamic_state3: provoking vertex mode */
+      config.direct3d_provoking_vertex =
+         dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+
+      /* VK_EXT_extended_dynamic_state3: line rasterization mode */
+      if (dyn->rs.line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR)
+         config.line_rasterization = V3D_LINE_RASTERIZATION_DIAMOND_EXIT;
+      else
+         config.line_rasterization = V3D_LINE_RASTERIZATION_PERP_END_CAPS;
+
+      /* diamond-exit rasterization does not support oversample */
+      config.rasterizer_oversample_mode =
+         (config.line_rasterization == V3D_LINE_RASTERIZATION_PERP_END_CAPS &&
+          pipeline->msaa) ? 1 : 0;
+
       /* V3D 4.2 doesn't support depth bounds testing so we don't advertise that
        * feature and it shouldn't be used by any pipeline.
        */
@@ -2058,6 +2089,20 @@ v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
 #if V3D_VERSION >= 71
       config.depth_bounds_test_enable =
          dyn->ds.depth.bounds_test.enable && has_depth;
+
+      /* VK_EXT_extended_dynamic_state3: depth clip/clamp (V3D 7.1+) */
+      bool z_clamp_enable = dyn->rs.depth_clamp_enable;
+      bool z_clip_enable = vk_rasterization_state_depth_clip_enable(&dyn->rs);
+
+      if (z_clip_enable) {
+         /* VK_EXT_extended_dynamic_state3: depth clip negative one to one */
+         config.z_clipping_mode = dyn->vp.depth_clip_negative_one_to_one ?
+            V3D_Z_CLIP_MODE_MIN_ONE_TO_ONE : V3D_Z_CLIP_MODE_ZERO_TO_ONE;
+      } else {
+         config.z_clipping_mode = V3D_Z_CLIP_MODE_NONE;
+      }
+
+      config.z_clamp_mode = z_clamp_enable;
 #endif
 
       config.enable_depth_offset = dyn->rs.depth_bias.enable;
@@ -2069,6 +2114,14 @@ v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_DS_STENCIL_TEST_ENABLE);
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_BIAS_ENABLE);
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_POLYGON_MODE);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_MODE);
+#if V3D_VERSION >= 71
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLIP_ENABLE);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE);
+#endif
 }
 
 void
