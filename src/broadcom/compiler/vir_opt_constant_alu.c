@@ -62,12 +62,88 @@
 static bool
 opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
 {
-        /* FIXME: handle more add operations */
         struct qreg unif = { };
         switch (inst->qpu.alu.add.op) {
         case V3D_QPU_A_ADD:
                 c->cursor = vir_after_inst(inst);
                 unif = vir_uniform_ui(c, values[0].ui + values[1].ui);
+                break;
+
+        case V3D_QPU_A_SUB:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui - values[1].ui);
+                break;
+
+        case V3D_QPU_A_SHL:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui << (values[1].ui & 0x1f));
+                break;
+
+        case V3D_QPU_A_SHR:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui >> (values[1].ui & 0x1f));
+                break;
+
+        case V3D_QPU_A_ASR:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, (int32_t)values[0].ui >> (values[1].ui & 0x1f));
+                break;
+
+        case V3D_QPU_A_AND:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui & values[1].ui);
+                break;
+
+        case V3D_QPU_A_OR:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui | values[1].ui);
+                break;
+
+        case V3D_QPU_A_XOR:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui ^ values[1].ui);
+                break;
+
+        case V3D_QPU_A_MIN:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, MIN2((int32_t)values[0].ui,
+                                              (int32_t)values[1].ui));
+                break;
+
+        case V3D_QPU_A_MAX:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, MAX2((int32_t)values[0].ui,
+                                              (int32_t)values[1].ui));
+                break;
+
+        case V3D_QPU_A_UMIN:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, MIN2(values[0].ui, values[1].ui));
+                break;
+
+        case V3D_QPU_A_UMAX:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, MAX2(values[0].ui, values[1].ui));
+                break;
+
+        case V3D_QPU_A_FADD:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, values[0].f + values[1].f);
+                break;
+
+        case V3D_QPU_A_FSUB:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, values[0].f - values[1].f);
+                break;
+
+        case V3D_QPU_A_FMIN:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, fminf(values[0].f, values[1].f));
+                break;
+
+        case V3D_QPU_A_FMAX:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, fmaxf(values[0].f, values[1].f));
                 break;
 
         case V3D_QPU_A_VFPACK: {
@@ -81,6 +157,59 @@ opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 unif = vir_uniform_ui(c, packed);
                 break;
         }
+
+        default:
+                return false;
+        }
+
+        /* Remove the original ALU instruction and replace it with a uniform
+         * load. If the original instruction loaded an implicit uniform we
+         * need to replicate that in the new instruction.
+         */
+        struct qreg dst = inst->dst;
+        struct qinst *mov = vir_MOV_dest(c, dst, unif);
+        mov->uniform = inst->uniform;
+        vir_remove_instruction(c, inst);
+        if (dst.file == QFILE_TEMP)
+                c->defs[dst.index] = mov;
+        return true;
+}
+
+static bool
+opt_constant_mul(struct v3d_compile *c, struct qinst *inst, union fi *values)
+{
+        struct qreg unif = { };
+        switch (inst->qpu.alu.mul.op) {
+        case V3D_QPU_M_ADD:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui + values[1].ui);
+                break;
+
+        case V3D_QPU_M_SUB:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui - values[1].ui);
+                break;
+
+        case V3D_QPU_M_UMUL24:
+                /* UMUL24 multiplies the low 24 bits */
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, (values[0].ui & 0xffffff) *
+                                         (values[1].ui & 0xffffff));
+                break;
+
+        case V3D_QPU_M_SMUL24: {
+                /* SMUL24 is signed 24-bit multiply */
+                int32_t a = (values[0].ui << 8) >> 8;  /* sign-extend 24-bit */
+                int32_t b = (values[1].ui << 8) >> 8;
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, a * b);
+                break;
+        }
+
+        case V3D_QPU_M_FMUL:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, values[0].f * values[1].f);
+                break;
 
         default:
                 return false;
@@ -143,9 +272,11 @@ try_opt_constant_alu(struct v3d_compile *c, struct qinst *inst)
                 return false;
         }
 
-        /* FIXME: handle mul operations */
         if (vir_is_add(inst))
                 return opt_constant_add(c, inst, values);
+
+        if (vir_is_mul(inst))
+                return opt_constant_mul(c, inst, values);
 
         return false;
 }
