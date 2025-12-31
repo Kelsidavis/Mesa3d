@@ -47,6 +47,7 @@ struct v3dv_pipeline_key {
    uint8_t topology;
    uint8_t logicop_func;
    bool dynamic_logicop_func;
+   bool dynamic_blend_equations;
    bool msaa;
    bool sample_alpha_to_coverage;
    bool sample_alpha_to_one;
@@ -434,6 +435,9 @@ struct v3dv_pipeline {
 
       /* True if blend enables are dynamic (VK_EXT_extended_dynamic_state3). */
       bool dynamic_blend_enables;
+
+      /* True if blend equations are dynamic (VK_EXT_extended_dynamic_state3). */
+      bool dynamic_blend_equations;
 
       /* True if logic op func is dynamic (VK_EXT_extended_dynamic_state2). */
       bool dynamic_logicop_func;
