@@ -23,6 +23,7 @@
 
 #include "v3dv_private.h"
 #include "broadcom/common/v3d_tiling.h"
+#include "util/box.h"
 #include "vk_format.h"
 
 static void
