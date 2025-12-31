@@ -2159,6 +2159,7 @@ v3dX(cmd_buffer_emit_occlusion_query)(struct v3dv_cmd_buffer *cmd_buffer)
 
 static struct v3dv_job *
 cmd_buffer_subpass_split_for_barrier(struct v3dv_cmd_buffer *cmd_buffer,
+                                     uint8_t barrier_sources,
                                      bool is_bcl_barrier)
 {
    assert(cmd_buffer->state.subpass_idx != -1);
@@ -2169,8 +2170,10 @@ cmd_buffer_subpass_split_for_barrier(struct v3dv_cmd_buffer *cmd_buffer,
    if (!job)
       return NULL;
 
-   /* FIXME: we can do better than all barriers */
-   job->serialize = V3DV_BARRIER_ALL;
+   /* Only serialize against the barrier sources that actually require it,
+    * rather than all possible sources.
+    */
+   job->serialize = barrier_sources;
    job->needs_bcl_sync = is_bcl_barrier;
    return job;
 }
@@ -2276,8 +2279,17 @@ v3dX(cmd_buffer_execute_inside_pass)(struct v3dv_cmd_buffer *primary,
                   pending_barrier.bcl_buffer_access ||
                   pending_barrier.bcl_image_access;
 
+               /* Compute the actual barrier sources we need to serialize
+                * against: the secondary job's serialize flags plus any
+                * pending graphics barriers (since we're in a render pass).
+                */
+               uint8_t barrier_sources = secondary_job->serialize;
+               if (pending_barrier.dst_mask & V3DV_BARRIER_GRAPHICS_BIT)
+                  barrier_sources |= pending_barrier.src_mask_graphics;
+
                primary_job =
                   cmd_buffer_subpass_split_for_barrier(primary,
+                                                       barrier_sources,
                                                        needs_bcl_barrier);
                v3dv_return_if_oom(primary, NULL);
 
