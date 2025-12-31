@@ -259,6 +259,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_depth_clip_control               = true,
       .EXT_depth_clip_enable                = device->devinfo.ver >= 71,
       .EXT_device_memory_report             = true,
+      .EXT_dynamic_rendering_unused_attachments = true,
       .EXT_load_store_op_none               = true,
       .EXT_inline_uniform_block             = true,
       .EXT_extended_dynamic_state           = true,
@@ -274,6 +275,8 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_image_drm_format_modifier        = true,
       .EXT_image_robustness                 = true,
       .EXT_index_type_uint8                 = true,
+      .EXT_legacy_dithering                 = true,
+      .EXT_legacy_vertex_attributes         = true,
       .EXT_line_rasterization               = true,
       .EXT_memory_budget                    = true,
       .EXT_multi_draw                       = true,
@@ -601,6 +604,9 @@ get_features(const struct v3dv_physical_device *physical_device,
       /* VK_KHR_dynamic_rendering_local_read */
       .dynamicRenderingLocalRead = true,
 
+      /* VK_EXT_dynamic_rendering_unused_attachments */
+      .dynamicRenderingUnusedAttachments = true,
+
       /* VK_KHR_maintenance5 */
       .maintenance5 = true,
 
@@ -633,6 +639,12 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_host_image_copy */
       .hostImageCopy = true,
+
+      /* VK_EXT_legacy_dithering */
+      .legacyDithering = true,
+
+      /* VK_EXT_legacy_vertex_attributes */
+      .legacyVertexAttributes = true,
 
       /* VK_EXT_pipeline_protected_access
        * Set to false because V3D doesn't support protected memory.
@@ -1474,6 +1486,9 @@ get_device_properties(const struct v3dv_physical_device *device,
       .rgba4OpaqueBlackSwizzled = true,
       .resolveSrgbFormatAppliesTransferFunction = true,
       .resolveSrgbFormatSupportsTransferFunctionControl = false,
+
+      /* VK_EXT_legacy_vertex_attributes */
+      .nativeUnalignedPerformance = true,
 
       /* VK_KHR_push_descriptor */
       .maxPushDescriptors = 32,
