@@ -9,6 +9,7 @@ libbroadcom_compiler_files = files(
   'vir_opt_alu.c',
   'vir_opt_coalesce_tmu_write.c',
   'vir_opt_constant_alu.c',
+  'vir_opt_constant_propagate.c',
   'vir_opt_copy_propagate.c',
   'vir_opt_dead_code.c',
   'vir_opt_redundant_flags.c',
