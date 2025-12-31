@@ -1309,9 +1309,9 @@ get_device_properties(const struct v3dv_physical_device *device,
       VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
       VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
    };
-   properties->pCopySrcLayouts = v3dv_host_copy_layouts;
+   properties->pCopySrcLayouts = (VkImageLayout *) v3dv_host_copy_layouts;
    properties->copySrcLayoutCount = ARRAY_SIZE(v3dv_host_copy_layouts);
-   properties->pCopyDstLayouts = v3dv_host_copy_layouts;
+   properties->pCopyDstLayouts = (VkImageLayout *) v3dv_host_copy_layouts;
    properties->copyDstLayoutCount = ARRAY_SIZE(v3dv_host_copy_layouts);
    /* Use driver UUID for optimal tiling - all V3D uses same tiling */
    memcpy(properties->optimalTilingLayoutUUID, device->driver_uuid, VK_UUID_SIZE);
