@@ -618,6 +618,11 @@ struct v3dv_device {
 
    void *device_address_mem_ctx;
    struct util_dynarray device_address_bo_list; /* Array of struct v3dv_bo * */
+
+   /* Cached array of BDA BO handles for fast submit-time access.
+    * Updated whenever device_address_bo_list changes.
+    */
+   struct util_dynarray device_address_bo_handles; /* Array of uint32_t */
 };
 
 struct v3dv_device_memory {

@@ -2100,6 +2100,8 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
    device->device_address_mem_ctx = ralloc_context(NULL);
    util_dynarray_init(&device->device_address_bo_list,
                       device->device_address_mem_ctx);
+   util_dynarray_init(&device->device_address_bo_handles,
+                      device->device_address_mem_ctx);
 
    mtx_init(&device->events.lock, mtx_plain);
    result = v3dv_event_allocate_resources(device);
@@ -2369,15 +2371,35 @@ device_add_device_address_bo(struct v3dv_device *device,
                                   struct v3dv_bo *bo)
 {
    util_dynarray_append(&device->device_address_bo_list, bo);
+   util_dynarray_append(&device->device_address_bo_handles, bo->handle);
 }
 
 static void
 device_remove_device_address_bo(struct v3dv_device *device,
                                 struct v3dv_bo *bo)
 {
+   /* Find the index of the BO being removed so we can remove the
+    * corresponding handle at the same index.
+    */
+   uint32_t idx = 0;
+   util_dynarray_foreach(&device->device_address_bo_list,
+                         struct v3dv_bo *, iter) {
+      if (*iter == bo)
+         break;
+      idx++;
+   }
+
    util_dynarray_delete_unordered(&device->device_address_bo_list,
                                   struct v3dv_bo *,
                                   bo);
+
+   /* Remove the handle at the same index by swapping with the last element */
+   uint32_t *handles = util_dynarray_begin(&device->device_address_bo_handles);
+   uint32_t count = util_dynarray_num_elements(&device->device_address_bo_handles,
+                                               uint32_t);
+   if (idx < count - 1)
+      handles[idx] = handles[count - 1];
+   device->device_address_bo_handles.size -= sizeof(uint32_t);
 }
 
 static void

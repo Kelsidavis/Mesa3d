@@ -918,6 +918,65 @@ handle_csd_indirect_cpu_job(struct v3dv_queue *queue,
    return VK_SUCCESS;
 }
 
+/**
+ * Build an array of BO handles for job submission. For jobs using buffer
+ * device addresses, this efficiently merges the job's BOs with the device's
+ * BDA BO handles using bitmap-based deduplication instead of per-BO hash
+ * set operations.
+ *
+ * Returns the allocated array (caller must free) and sets *count to the
+ * number of valid handles.
+ */
+static uint32_t *
+build_bo_handles(struct v3dv_device *device,
+                 struct v3dv_job *job,
+                 uint32_t *count)
+{
+   uint32_t bda_count = 0;
+   if (job->uses_buffer_device_address) {
+      bda_count = util_dynarray_num_elements(&device->device_address_bo_handles,
+                                             uint32_t);
+   }
+
+   /* Allocate with extra space for potential BDA handles */
+   uint32_t max_count = job->bo_count + bda_count;
+   uint32_t *bo_handles = malloc(sizeof(uint32_t) * MAX2(4, max_count));
+   if (!bo_handles)
+      return NULL;
+
+   /* Copy job BO handles */
+   uint32_t bo_idx = 0;
+   set_foreach(job->bos, entry) {
+      struct v3dv_bo *bo = (struct v3dv_bo *)entry->key;
+      bo_handles[bo_idx++] = bo->handle;
+   }
+
+   /* For BDA jobs, add handles not already in the job's BO set.
+    * Use the bitmap for fast initial filtering to avoid hash lookups.
+    */
+   if (job->uses_buffer_device_address) {
+      struct v3dv_bo **bda_bos =
+         util_dynarray_begin(&device->device_address_bo_list);
+      uint32_t *bda_handles =
+         util_dynarray_begin(&device->device_address_bo_handles);
+
+      for (uint32_t i = 0; i < bda_count; i++) {
+         struct v3dv_bo *bo = bda_bos[i];
+         /* Fast path: if bit not set, BO is definitely not in job */
+         if (!(job->bo_handle_mask & bo->handle_bit)) {
+            bo_handles[bo_idx++] = bda_handles[i];
+         } else {
+            /* Bit collision possible - do full hash lookup */
+            if (!_mesa_set_search(job->bos, bo))
+               bo_handles[bo_idx++] = bda_handles[i];
+         }
+      }
+   }
+
+   *count = bo_idx;
+   return bo_handles;
+}
+
 static VkResult
 handle_cl_job(struct v3dv_queue *queue,
               struct v3dv_job *job,
@@ -956,26 +1015,10 @@ handle_cl_job(struct v3dv_queue *queue,
    if (job->tmu_dirty_rcl)
       submit.flags |= DRM_V3D_SUBMIT_CL_FLUSH_CACHE;
 
-   /* If the job uses VK_KHR_buffer_device_address we need to ensure all
-    * buffers flagged with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-    * are included.
-    */
-   if (job->uses_buffer_device_address) {
-      util_dynarray_foreach(&queue->device->device_address_bo_list,
-                            struct v3dv_bo *, bo) {
-         v3dv_job_add_bo(job, *bo);
-      }
-   }
-
-   submit.bo_handle_count = job->bo_count;
-   uint32_t *bo_handles =
-      (uint32_t *) malloc(sizeof(uint32_t) * submit.bo_handle_count);
-   uint32_t bo_idx = 0;
-   set_foreach(job->bos, entry) {
-      struct v3dv_bo *bo = (struct v3dv_bo *)entry->key;
-      bo_handles[bo_idx++] = bo->handle;
-   }
-   assert(bo_idx == submit.bo_handle_count);
+   /* Build BO handles array, merging job BOs with BDA BOs if needed */
+   uint32_t *bo_handles = build_bo_handles(device, job, &submit.bo_handle_count);
+   if (!bo_handles)
+      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
    submit.bo_handles = (uintptr_t)(void *)bo_handles;
 
    submit.perfmon_id = job->perf ?
@@ -1108,26 +1151,10 @@ handle_csd_job(struct v3dv_queue *queue,
 
    struct drm_v3d_submit_csd *submit = &job->csd.submit;
 
-   /* If the job uses VK_KHR_buffer_device_address we need to ensure all
-    * buffers flagged with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-    * are included.
-    */
-   if (job->uses_buffer_device_address) {
-      util_dynarray_foreach(&queue->device->device_address_bo_list,
-                            struct v3dv_bo *, bo) {
-         v3dv_job_add_bo(job, *bo);
-      }
-   }
-
-   submit->bo_handle_count = job->bo_count;
-   uint32_t *bo_handles =
-      (uint32_t *) malloc(sizeof(uint32_t) * MAX2(4, submit->bo_handle_count * 2));
-   uint32_t bo_idx = 0;
-   set_foreach(job->bos, entry) {
-      struct v3dv_bo *bo = (struct v3dv_bo *)entry->key;
-      bo_handles[bo_idx++] = bo->handle;
-   }
-   assert(bo_idx == submit->bo_handle_count);
+   /* Build BO handles array, merging job BOs with BDA BOs if needed */
+   uint32_t *bo_handles = build_bo_handles(device, job, &submit->bo_handle_count);
+   if (!bo_handles)
+      return vk_error(device->instance, VK_ERROR_OUT_OF_HOST_MEMORY);
    submit->bo_handles = (uintptr_t)(void *)bo_handles;
 
    /* Replace single semaphore settings whenever our kernel-driver supports

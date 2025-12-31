@@ -36,6 +36,7 @@
 
 #define MAX_TOTAL_TEXTURE_SAMPLERS (V3D_MAX_TEXTURE_SAMPLERS * MAX_STAGES)
 struct texture_bo_list {
+   uint32_t max_idx;
    struct v3dv_bo *tex[MAX_TOTAL_TEXTURE_SAMPLERS];
 };
 
@@ -52,6 +53,8 @@ struct state_bo_list {
                                     MAX_INLINE_UNIFORM_BUFFERS) * MAX_STAGES)
 #define MAX_TOTAL_STORAGE_BUFFERS (MAX_STORAGE_BUFFERS * MAX_STAGES)
 struct buffer_bo_list {
+   uint32_t max_ubo_idx;
+   uint32_t max_ssbo_idx;
    struct v3dv_bo *ubo[MAX_TOTAL_UNIFORM_BUFFERS];
    struct v3dv_bo *ssbo[MAX_TOTAL_STORAGE_BUFFERS];
 };
@@ -164,6 +167,8 @@ write_tmu_p0(struct v3dv_cmd_buffer *cmd_buffer,
    assert(texture_bo);
    assert(texture_idx < V3D_MAX_TEXTURE_SAMPLERS);
    tex_bos->tex[texture_idx] = texture_bo;
+   if (texture_idx >= tex_bos->max_idx)
+      tex_bos->max_idx = texture_idx + 1;
 
    struct v3dv_cl_reloc state_reloc =
       v3dv_descriptor_map_get_texture_shader_state(cmd_buffer->device, descriptor_state,
@@ -333,9 +338,13 @@ write_ubo_ssbo_uniforms(struct v3dv_cmd_buffer *cmd_buffer,
          if (content == QUNIFORM_UBO_ADDR) {
             assert(index < MAX_TOTAL_UNIFORM_BUFFERS);
             buffer_bos->ubo[index] = bo;
+            if (index >= buffer_bos->max_ubo_idx)
+               buffer_bos->max_ubo_idx = index + 1;
          } else {
             assert(index < MAX_TOTAL_STORAGE_BUFFERS);
             buffer_bos->ssbo[index] = bo;
+            if (index >= buffer_bos->max_ssbo_idx)
+               buffer_bos->max_ssbo_idx = index + 1;
          }
       }
    }
@@ -793,20 +802,23 @@ v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
 
    cl_end(&job->indirect, uniforms);
 
-   for (int i = 0; i < MAX_TOTAL_TEXTURE_SAMPLERS; i++) {
+   /* Only iterate up to the maximum used index for each BO list.
+    * This avoids iterating over potentially 72+ empty slots per dispatch.
+    */
+   for (uint32_t i = 0; i < tex_bos.max_idx; i++) {
       if (tex_bos.tex[i])
          v3dv_job_add_bo(job, tex_bos.tex[i]);
    }
 
-   for (int i = 0; i < state_bos.count; i++)
+   for (uint32_t i = 0; i < state_bos.count; i++)
       v3dv_job_add_bo(job, state_bos.states[i]);
 
-   for (int i = 0; i < MAX_TOTAL_UNIFORM_BUFFERS; i++) {
+   for (uint32_t i = 0; i < buffer_bos.max_ubo_idx; i++) {
       if (buffer_bos.ubo[i])
          v3dv_job_add_bo(job, buffer_bos.ubo[i]);
    }
 
-   for (int i = 0; i < MAX_TOTAL_STORAGE_BUFFERS; i++) {
+   for (uint32_t i = 0; i < buffer_bos.max_ssbo_idx; i++) {
       if (buffer_bos.ssbo[i])
          v3dv_job_add_bo(job, buffer_bos.ssbo[i]);
    }
