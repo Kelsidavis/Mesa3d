@@ -251,6 +251,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats                     = true,
       .EXT_attachment_feedback_loop_layout  = true,
+      .EXT_attachment_feedback_loop_dynamic_state = true,
       .EXT_border_color_swizzle             = true,
       .EXT_color_write_enable               = true,
       .EXT_custom_border_color              = true,
@@ -265,6 +266,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_extended_dynamic_state           = true,
       .EXT_extended_dynamic_state2          = true,
       .EXT_external_memory_dma_buf          = true,
+      .EXT_external_memory_acquire_unmodified = true,
       .EXT_global_priority                  = true,
       .EXT_global_priority_query            = true,
 #ifdef V3DV_USE_WSI_PLATFORM
@@ -570,6 +572,9 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_attachment_feedback_loop_layout */
       .attachmentFeedbackLoopLayout = true,
+
+      /* VK_EXT_attachment_feedback_loop_dynamic_state */
+      .attachmentFeedbackLoopDynamicState = true,
 
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
