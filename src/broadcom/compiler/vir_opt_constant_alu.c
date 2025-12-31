@@ -274,6 +274,11 @@ opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 unif = vir_uniform_f(c, (float)values[0].ui);
                 break;
 
+        case V3D_QPU_A_CLZ:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui ? __builtin_clz(values[0].ui) : 32);
+                break;
+
         default:
                 return false;
         }
@@ -326,6 +331,19 @@ opt_constant_mul(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 c->cursor = vir_after_inst(inst);
                 unif = vir_uniform_f(c, values[0].f * values[1].f);
                 break;
+
+        case V3D_QPU_M_VFMUL: {
+                /* Vectorized f16x2 multiplication */
+                float a_lo = _mesa_half_to_float(values[0].ui & 0xffff);
+                float a_hi = _mesa_half_to_float(values[0].ui >> 16);
+                float b_lo = _mesa_half_to_float(values[1].ui & 0xffff);
+                float b_hi = _mesa_half_to_float(values[1].ui >> 16);
+                uint32_t result = ((uint32_t)_mesa_float_to_half(a_hi * b_hi) << 16) |
+                                  _mesa_float_to_half(a_lo * b_lo);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
 
         /* Unary operations - MOV just copies the constant value */
         case V3D_QPU_M_MOV:
