@@ -137,6 +137,8 @@ opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 break;
 
         case V3D_QPU_A_FADD:
+        case V3D_QPU_A_FADDNF:
+                /* FADDNF is "no flush" variant - same result for constant folding */
                 c->cursor = vir_after_inst(inst);
                 unif = vir_uniform_f(c, values[0].f + values[1].f);
                 break;
@@ -492,6 +494,24 @@ opt_constant_mul(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 int8_t val = (int8_t)((values[0].ui >> 8) & 0xff);
                 c->cursor = vir_after_inst(inst);
                 unif = vir_uniform_f(c, CLAMP((float)val / 127.0f, -1.0f, 1.0f));
+                break;
+        }
+
+        case V3D_QPU_M_VFTOUNORM10LO: {
+                /* Convert f16x2 low half [0,1] to 10-bit unorm [0,1023] */
+                float lo = _mesa_half_to_float(values[0].ui & 0xffff);
+                uint32_t result = (uint32_t)(CLAMP(lo, 0.0f, 1.0f) * 1023.0f + 0.5f);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result & 0x3ff);
+                break;
+        }
+
+        case V3D_QPU_M_VFTOUNORM10HI: {
+                /* Convert f16x2 high half [0,1] to 10-bit unorm [0,1023] */
+                float hi = _mesa_half_to_float(values[0].ui >> 16);
+                uint32_t result = (uint32_t)(CLAMP(hi, 0.0f, 1.0f) * 1023.0f + 0.5f);
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result & 0x3ff);
                 break;
         }
 
