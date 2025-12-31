@@ -1188,22 +1188,11 @@ get_device_properties(const struct v3dv_physical_device *device,
       },
       .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
       .supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
-      /* FIXME: if we want to support independentResolveNone then we would
-       * need to honor attachment load operations on resolve attachments,
-       * which we currently ignore because the resolve makes them irrelevant,
-       * as it unconditionally writes all pixels in the render area. However,
-       * with independentResolveNone, it is possible to have one aspect of a
-       * D/S resolve attachment stay unresolved, in which case the attachment
-       * load operation is relevant.
-       *
-       * NOTE: implementing attachment load for resolve attachments isn't
-       * immediately trivial because these attachments are not part of the
-       * framebuffer and therefore we can't use the same mechanism we use
-       * for framebuffer attachments. Instead, we should probably have to
-       * emit a meta operation for that right at the start of the render
-       * pass (or subpass).
+      /* We support independentResolveNone by emitting a separate TLB clear
+       * job at subpass start for non-resolved D/S aspects when their loadOp
+       * is CLEAR. See cmd_buffer_emit_non_resolved_ds_aspect_clear().
        */
-      .independentResolveNone = false,
+      .independentResolveNone = true,
       .independentResolve = false,
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
 

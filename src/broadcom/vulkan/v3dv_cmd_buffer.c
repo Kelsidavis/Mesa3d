@@ -23,6 +23,7 @@
 
 #include "broadcom/common/v3d_csd.h"
 #include "v3dv_private.h"
+#include "v3dv_meta_common.h"
 #include "compiler/nir/nir_builder.h"
 #include "util/perf/cpu_trace.h"
 #include "util/u_pack_color.h"
@@ -1820,12 +1821,120 @@ cmd_buffer_subpass_create_job(struct v3dv_cmd_buffer *cmd_buffer,
    return job;
 }
 
+/* For independentResolveNone: when one D/S aspect is resolved but the other
+ * is not, we need to honor the loadOp of the non-resolved aspect on the
+ * resolve attachment. Since the resolve attachment is not part of the
+ * framebuffer, we can't use the normal TLB clear mechanism. Instead, we
+ * emit a separate TLB clear job for the non-resolved aspect if needed.
+ */
+static void
+cmd_buffer_emit_non_resolved_ds_aspect_clear(struct v3dv_cmd_buffer *cmd_buffer,
+                                             uint32_t subpass_idx)
+{
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+   const struct v3dv_render_pass *pass = state->pass;
+   const struct v3dv_subpass *subpass = &pass->subpasses[subpass_idx];
+
+   /* Only applies when exactly one of depth/stencil is resolved */
+   if (subpass->ds_resolve_attachment.attachment == VK_ATTACHMENT_UNUSED)
+      return;
+
+   if (subpass->resolve_depth == subpass->resolve_stencil)
+      return;  /* Both resolved or neither - no special handling needed */
+
+   const uint32_t resolve_idx = subpass->ds_resolve_attachment.attachment;
+   const struct v3dv_render_pass_attachment *resolve_att =
+      &pass->attachments[resolve_idx];
+
+   /* Check if the non-resolved aspect needs a clear */
+   VkAttachmentLoadOp load_op;
+   VkImageAspectFlags aspect;
+   if (subpass->resolve_depth) {
+      /* Depth is resolved, check stencil loadOp */
+      load_op = resolve_att->desc.stencilLoadOp;
+      aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
+   } else {
+      /* Stencil is resolved, check depth loadOp */
+      load_op = resolve_att->desc.loadOp;
+      aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+   }
+
+   if (load_op != VK_ATTACHMENT_LOAD_OP_CLEAR)
+      return;
+
+   /* Get the resolve attachment image */
+   const struct v3dv_image_view *iview = state->attachments[resolve_idx].image_view;
+   if (!iview)
+      return;
+
+   struct v3dv_image *image = (struct v3dv_image *)iview->vk.image;
+   const VkClearValue *clear_value = &state->attachments[resolve_idx].vk_clear_value;
+
+   /* Set up the clear job */
+   const VkOffset3D origin = { 0, 0, 0 };
+   VkFormat fb_format;
+   if (!v3dv_meta_can_use_tlb(image, 0, 0, &origin, NULL, &fb_format))
+      return;
+
+   uint32_t internal_type, internal_bpp;
+   v3d_X((&cmd_buffer->device->devinfo), get_internal_type_bpp_for_image_aspects)
+      (fb_format, aspect, &internal_type, &internal_bpp);
+
+   union v3dv_clear_value hw_clear_value = { 0 };
+   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT)
+      hw_clear_value.z = clear_value->depthStencil.depth;
+   else
+      hw_clear_value.s = clear_value->depthStencil.stencil;
+
+   /* Use render area dimensions for the clear job */
+   uint32_t width = state->render_area.offset.x + state->render_area.extent.width;
+   uint32_t height = state->render_area.offset.y + state->render_area.extent.height;
+
+   /* Handle multiview */
+   uint32_t layers = 1;
+   if (subpass->view_mask != 0)
+      layers = util_last_bit(subpass->view_mask);
+   else if (iview->vk.layer_count > 0)
+      layers = iview->vk.layer_count;
+
+   struct v3dv_job *job =
+      v3dv_cmd_buffer_start_job(cmd_buffer, -1, V3DV_JOB_TYPE_GPU_CL);
+   if (!job)
+      return;
+
+   v3dv_job_start_frame(job, width, height, layers,
+                        false, true, 1, internal_bpp,
+                        4 * v3d_internal_bpp_words(internal_bpp),
+                        image->vk.samples > VK_SAMPLE_COUNT_1_BIT);
+
+   struct v3dv_meta_framebuffer framebuffer;
+   v3d_X((&job->device->devinfo), meta_framebuffer_init)(&framebuffer, fb_format,
+                                                          internal_type,
+                                                          &job->frame_tiling);
+
+   v3d_X((&job->device->devinfo), job_emit_binning_flush)(job);
+
+   v3d_X((&job->device->devinfo), meta_emit_clear_image_rcl)
+      (job, image, &framebuffer, &hw_clear_value,
+       aspect, iview->vk.base_array_layer,
+       iview->vk.base_array_layer + layers, iview->vk.base_mip_level);
+
+   v3dv_cmd_buffer_finish_job(cmd_buffer);
+}
+
 struct v3dv_job *
 v3dv_cmd_buffer_subpass_start(struct v3dv_cmd_buffer *cmd_buffer,
                               uint32_t subpass_idx)
 {
    assert(cmd_buffer->state.pass);
    assert(subpass_idx < cmd_buffer->state.pass->subpass_count);
+
+   /* For independentResolveNone, emit a clear for non-resolved D/S aspects
+    * before starting the main subpass job. This must happen before the
+    * subpass job since the resolve attachment is not in the framebuffer.
+    */
+   if (!cmd_buffer->state.resuming)
+      cmd_buffer_emit_non_resolved_ds_aspect_clear(cmd_buffer, subpass_idx);
 
    struct v3dv_job *job =
       cmd_buffer_subpass_create_job(cmd_buffer, subpass_idx,
