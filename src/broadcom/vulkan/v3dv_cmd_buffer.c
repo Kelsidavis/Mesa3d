@@ -370,15 +370,52 @@ cmd_buffer_can_merge_subpass(struct v3dv_cmd_buffer *cmd_buffer,
    if (subpass->view_mask != prev_subpass->view_mask)
       return false;
 
-   /* FIXME: Since some attachment formats can't be resolved using the TLB we
-    * need to emit separate resolve jobs for them and that would not be
-    * compatible with subpass merges. We could fix that by testing if any of
-    * the attachments to resolve doesn't support TLB resolves.
+   /* If any attachment has a resolve that can't use the TLB, we need to emit
+    * separate resolve jobs which is incompatible with subpass merging. Check
+    * if all resolve attachments support TLB resolve based on their format.
     */
-   if (prev_subpass->resolve_attachments || subpass->resolve_attachments ||
-       prev_subpass->resolve_depth || prev_subpass->resolve_stencil ||
-       subpass->resolve_depth || subpass->resolve_stencil) {
-      return false;
+   const struct v3dv_render_pass *pass = state->pass;
+
+   /* Check previous subpass color resolve attachments */
+   if (prev_subpass->resolve_attachments) {
+      for (uint32_t i = 0; i < prev_subpass->color_count; i++) {
+         uint32_t att_idx = prev_subpass->color_attachments[i].attachment;
+         if (att_idx == VK_ATTACHMENT_UNUSED)
+            continue;
+         if (prev_subpass->resolve_attachments[i].attachment != VK_ATTACHMENT_UNUSED &&
+             !pass->attachments[att_idx].try_tlb_resolve) {
+            return false;
+         }
+      }
+   }
+
+   /* Check current subpass color resolve attachments */
+   if (subpass->resolve_attachments) {
+      for (uint32_t i = 0; i < subpass->color_count; i++) {
+         uint32_t att_idx = subpass->color_attachments[i].attachment;
+         if (att_idx == VK_ATTACHMENT_UNUSED)
+            continue;
+         if (subpass->resolve_attachments[i].attachment != VK_ATTACHMENT_UNUSED &&
+             !pass->attachments[att_idx].try_tlb_resolve) {
+            return false;
+         }
+      }
+   }
+
+   /* Check previous subpass D/S resolve attachment */
+   if ((prev_subpass->resolve_depth || prev_subpass->resolve_stencil) &&
+       prev_subpass->ds_attachment.attachment != VK_ATTACHMENT_UNUSED) {
+      uint32_t att_idx = prev_subpass->ds_attachment.attachment;
+      if (!pass->attachments[att_idx].try_tlb_resolve)
+         return false;
+   }
+
+   /* Check current subpass D/S resolve attachment */
+   if ((subpass->resolve_depth || subpass->resolve_stencil) &&
+       subpass->ds_attachment.attachment != VK_ATTACHMENT_UNUSED) {
+      uint32_t att_idx = subpass->ds_attachment.attachment;
+      if (!pass->attachments[att_idx].try_tlb_resolve)
+         return false;
    }
 
    return true;
