@@ -89,6 +89,16 @@ opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 unif = vir_uniform_ui(c, (int32_t)values[0].ui >> (values[1].ui & 0x1f));
                 break;
 
+        case V3D_QPU_A_ROR: {
+                uint32_t shift = values[1].ui & 0x1f;
+                uint32_t result = shift ? ((values[0].ui >> shift) |
+                                           (values[0].ui << (32 - shift)))
+                                        : values[0].ui;
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, result);
+                break;
+        }
+
         case V3D_QPU_A_AND:
                 c->cursor = vir_after_inst(inst);
                 unif = vir_uniform_ui(c, values[0].ui & values[1].ui);
@@ -158,6 +168,62 @@ opt_constant_add(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 break;
         }
 
+        /* Unary operations */
+        case V3D_QPU_A_NOT:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, ~values[0].ui);
+                break;
+
+        case V3D_QPU_A_NEG:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, -values[0].ui);
+                break;
+
+        case V3D_QPU_A_FROUND:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, roundf(values[0].f));
+                break;
+
+        case V3D_QPU_A_FTRUNC:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, truncf(values[0].f));
+                break;
+
+        case V3D_QPU_A_FFLOOR:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, floorf(values[0].f));
+                break;
+
+        case V3D_QPU_A_FCEIL:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, ceilf(values[0].f));
+                break;
+
+        case V3D_QPU_A_FTOIN:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, (int32_t)roundf(values[0].f));
+                break;
+
+        case V3D_QPU_A_FTOIZ:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, (int32_t)truncf(values[0].f));
+                break;
+
+        case V3D_QPU_A_FTOUZ:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, (uint32_t)truncf(values[0].f));
+                break;
+
+        case V3D_QPU_A_ITOF:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, (float)(int32_t)values[0].ui);
+                break;
+
+        case V3D_QPU_A_UTOF:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_f(c, (float)values[0].ui);
+                break;
+
         default:
                 return false;
         }
@@ -209,6 +275,13 @@ opt_constant_mul(struct v3d_compile *c, struct qinst *inst, union fi *values)
         case V3D_QPU_M_FMUL:
                 c->cursor = vir_after_inst(inst);
                 unif = vir_uniform_f(c, values[0].f * values[1].f);
+                break;
+
+        /* Unary operations - MOV just copies the constant value */
+        case V3D_QPU_M_MOV:
+        case V3D_QPU_M_FMOV:
+                c->cursor = vir_after_inst(inst);
+                unif = vir_uniform_ui(c, values[0].ui);
                 break;
 
         default:
