@@ -1675,10 +1675,20 @@ v3dX(cmd_buffer_emit_color_write_mask)(struct v3dv_cmd_buffer *cmd_buffer)
    struct v3dv_job *job = cmd_buffer->state.job;
    v3dv_cl_ensure_space_with_branch(&job->bcl, cl_packet_length(COLOR_WRITE_MASKS));
 
-   struct v3dv_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
    struct v3dv_dynamic_state *v3dv_dyn = &cmd_buffer->state.dynamic;
-   uint32_t color_write_mask = ~v3dv_dyn->color_write_enable |
-                               pipeline->blend.color_write_masks;
+   struct vk_dynamic_graphics_state *vk_dyn = &cmd_buffer->vk.dynamic_graphics_state;
+
+   /* Compute color write masks from dynamic state. The hardware uses inverted
+    * logic where disabled channels have their bits set.
+    */
+   uint32_t color_write_masks = 0;
+   for (uint32_t i = 0; i < vk_dyn->cb.attachment_count; i++) {
+      uint8_t write_mask = vk_dyn->cb.attachments[i].write_mask;
+      color_write_masks |= (~write_mask & 0xf) << (4 * i);
+   }
+
+   /* Combine with color write enable (for VK_EXT_color_write_enable) */
+   uint32_t color_write_mask = ~v3dv_dyn->color_write_enable | color_write_masks;
 
 #if V3D_VERSION <= 42
    /* Only 4 RTs */
@@ -1691,6 +1701,8 @@ v3dX(cmd_buffer_emit_color_write_mask)(struct v3dv_cmd_buffer *cmd_buffer)
 
    BITSET_CLEAR(cmd_buffer->vk.dynamic_graphics_state.dirty,
                 MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
+   BITSET_CLEAR(cmd_buffer->vk.dynamic_graphics_state.dirty,
+                MESA_VK_DYNAMIC_CB_WRITE_MASKS);
 }
 
 static void

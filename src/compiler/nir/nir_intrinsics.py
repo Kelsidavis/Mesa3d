@@ -2172,6 +2172,11 @@ intrinsic("load_alpha_to_one_enabled_v3d", dest_comp=1, bit_sizes=[32],
 intrinsic("load_logic_op_enabled_v3d", dest_comp=1, bit_sizes=[32],
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# V3D-specific intrinsic for dynamic blend enable state (per render target)
+# Render target index is passed as immediate BASE.
+intrinsic("load_blend_enabled_v3d", dest_comp=1, bit_sizes=[32],
+          indices=[BASE], flags=[CAN_ELIMINATE, CAN_REORDER])
+
 # Active invocation index within the subgroup.
 # Equivalent to popcount(ballot(true) & ((1 << subgroup_invocation) - 1))
 intrinsic("load_active_subgroup_invocation_agx", dest_comp=1, flags=[CAN_ELIMINATE])

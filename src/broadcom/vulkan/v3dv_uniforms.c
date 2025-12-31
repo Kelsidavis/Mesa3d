@@ -698,6 +698,16 @@ v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
             job->cmd_buffer->vk.dynamic_graphics_state.cb.logic_op_enable ? 1 : 0);
          break;
 
+      case QUNIFORM_BLEND_ENABLED: {
+         uint32_t rt = data;
+         bool blend_enable = false;
+         if (rt < job->cmd_buffer->vk.dynamic_graphics_state.cb.attachment_count) {
+            blend_enable = job->cmd_buffer->vk.dynamic_graphics_state.cb.attachments[rt].blend_enable;
+         }
+         cl_aligned_u32(&uniforms, blend_enable ? 1 : 0);
+         break;
+      }
+
       default:
          UNREACHABLE("unsupported quniform_contents uniform type\n");
       }

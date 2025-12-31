@@ -1543,7 +1543,14 @@ v3d_fs_key_set_color_attachment(struct v3d_fs_key *key,
       struct vk_color_blend_attachment_state *att =
          &p_stage->pipeline->dynamic_graphics_state.cb.attachments[index];
 
-      if (att->blend_enable) {
+      /* When blend enables are dynamic, always compile with actual blend
+       * factors. The shader will conditionally apply blending at runtime.
+       * When blend enables are static and disabled, use replace mode.
+       */
+      bool use_blend_factors = att->blend_enable ||
+                               p_stage->pipeline->blend.dynamic_blend_enables;
+
+      if (use_blend_factors) {
          key->blend[index].rgb_func = vk_blend_op_to_pipe(att->color_blend_op);
          key->blend[index].alpha_func = vk_blend_op_to_pipe(att->alpha_blend_op);
          key->blend[index].rgb_dst_factor = vk_blend_factor_to_pipe(att->dst_color_blend_factor);
@@ -1665,6 +1672,7 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
    key->swap_color_rb = 0;
 
    key->software_blend = p_stage->pipeline->blend.use_software;
+   key->dynamic_blend_enables = p_stage->pipeline->blend.dynamic_blend_enables;
 
    for (uint32_t i = 0; i < rendering_info->color_attachment_count; i++) {
       if (rendering_info->color_attachment_formats[i] == VK_FORMAT_UNDEFINED)
@@ -2466,6 +2474,7 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
    }
 
    key->software_blend = pipeline->blend.use_software;
+   key->dynamic_blend_enables = pipeline->blend.dynamic_blend_enables;
 
    struct vk_render_pass_state *ri = &pipeline->rendering_info;
    for (uint32_t i = 0; i < ri->color_attachment_count; i++) {
@@ -2494,7 +2503,14 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
          struct vk_color_blend_attachment_state *att =
             &pipeline->dynamic_graphics_state.cb.attachments[i];
 
-         if (att->blend_enable) {
+         /* When blend enables are dynamic, always compile with actual blend
+          * factors. The shader will conditionally apply blending at runtime.
+          * When blend enables are static and disabled, use replace mode.
+          */
+         bool use_blend_factors = att->blend_enable ||
+                                  pipeline->blend.dynamic_blend_enables;
+
+         if (use_blend_factors) {
             key->blend[i].rgb_func = vk_blend_op_to_pipe(att->color_blend_op);
             key->blend[i].alpha_func = vk_blend_op_to_pipe(att->alpha_blend_op);
             key->blend[i].rgb_dst_factor = vk_blend_factor_to_pipe(att->dst_color_blend_factor);
@@ -3533,6 +3549,10 @@ pipeline_init(struct v3dv_pipeline *pipeline,
    pipeline_set_sample_mask(pipeline, ms_info);
    pipeline_set_sample_rate_shading(pipeline, ms_info);
    pipeline->line_smooth = enable_line_smooth(pipeline, rs_info);
+
+   /* Check if blend enables are dynamic (VK_EXT_extended_dynamic_state3) */
+   pipeline->blend.dynamic_blend_enables =
+      BITSET_TEST(pipeline_state.dynamic, MESA_VK_DYNAMIC_CB_BLEND_ENABLES);
 
    result = pipeline_compile_graphics(pipeline, cache, pCreateInfo, pAllocator);
 

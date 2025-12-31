@@ -3094,7 +3094,8 @@ v3dv_cmd_buffer_emit_pre_draw(struct v3dv_cmd_buffer *cmd_buffer,
       v3d_X((&device->devinfo), cmd_buffer_emit_sample_state)(cmd_buffer);
 
    if (*dirty & V3DV_CMD_DIRTY_PIPELINE ||
-       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES)) {
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_WRITE_MASKS)) {
       v3d_X((&device->devinfo), cmd_buffer_emit_color_write_mask)(cmd_buffer);
    }
 

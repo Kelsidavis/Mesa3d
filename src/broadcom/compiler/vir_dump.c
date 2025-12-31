@@ -132,6 +132,10 @@ vir_dump_uniform(enum quniform_contents contents,
                 fprintf(stderr, "num_wg.%c", data < 3 ? "xyz"[data] : '?');
                 break;
 
+        case QUNIFORM_BLEND_ENABLED:
+                fprintf(stderr, "blend_enabled[%d]", data);
+                break;
+
         default:
                 if (quniform_contents_is_texture_p0(contents)) {
                         fprintf(stderr, "tex[%d].p0: 0x%08x",

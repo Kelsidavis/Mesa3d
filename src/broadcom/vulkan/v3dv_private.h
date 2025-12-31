@@ -325,6 +325,7 @@ struct v3dv_pipeline_key {
    bool sample_alpha_to_coverage;
    bool sample_alpha_to_one;
    bool software_blend;
+   bool dynamic_blend_enables;
    uint8_t cbufs;
    struct {
       enum pipe_format format;
@@ -2406,6 +2407,9 @@ struct v3dv_pipeline {
        * fall back to software blend lowering.
        */
       bool use_software;
+
+      /* True if blend enables are dynamic (VK_EXT_extended_dynamic_state3). */
+      bool dynamic_blend_enables;
 
       /* Per-RT bit mask with blend enables. */
       uint8_t enables;

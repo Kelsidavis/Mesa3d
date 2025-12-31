@@ -477,8 +477,8 @@ get_features(const struct v3dv_physical_device *physical_device,
       .extendedDynamicState3DepthClampEnable = physical_device->devinfo.ver >= 71,
       .extendedDynamicState3DepthClipNegativeOneToOne = physical_device->devinfo.ver >= 71,
       .extendedDynamicState3ProvokingVertexMode = true,
-      .extendedDynamicState3ColorBlendEnable = false, /* requires shader variants */
-      .extendedDynamicState3ColorWriteMask = false, /* requires shader variants */
+      .extendedDynamicState3ColorBlendEnable = true,
+      .extendedDynamicState3ColorWriteMask = true,
       .extendedDynamicState3ColorBlendEquation = false, /* requires shader variants */
       .extendedDynamicState3SampleLocationsEnable = false, /* not supported */
       .extendedDynamicState3SampleMask = true,
