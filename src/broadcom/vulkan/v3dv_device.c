@@ -473,7 +473,8 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_workgroup_memory_explicit_layout */
       .workgroupMemoryExplicitLayout = true,
-      .workgroupMemoryExplicitLayoutScalarBlockLayout = false,
+      /* Same V3D 7.1 requirement as scalarBlockLayout for TMU alignment */
+      .workgroupMemoryExplicitLayoutScalarBlockLayout = physical_device->devinfo.ver >= 71,
       .workgroupMemoryExplicitLayout8BitAccess = true,
       .workgroupMemoryExplicitLayout16BitAccess = true,
 
