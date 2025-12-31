@@ -1241,6 +1241,7 @@ bool vir_opt_vpm(struct v3d_compile *c);
 bool vir_opt_constant_alu(struct v3d_compile *c);
 bool vir_opt_alu(struct v3d_compile *c);
 bool vir_opt_redundant_setnnmode(struct v3d_compile *c);
+bool vir_opt_coalesce_tmu_write(struct v3d_compile *c);
 bool v3d_nir_lower_io(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_line_smooth(nir_shader *shader);
 bool v3d_nir_lower_logic_ops(nir_shader *s, struct v3d_compile *c);

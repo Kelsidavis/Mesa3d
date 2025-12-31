@@ -3032,6 +3032,7 @@ vir_optimize(struct v3d_compile *c)
                 OPTPASS(vir_opt_constant_alu);
                 OPTPASS(vir_opt_alu);
                 OPTPASS(vir_opt_redundant_setnnmode);
+                OPTPASS(vir_opt_coalesce_tmu_write);
 
                 if (!progress)
                         break;
