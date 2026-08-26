@@ -1948,7 +1948,7 @@ cmd_buffer_emit_non_resolved_ds_aspect_clear(struct v3dv_cmd_buffer *cmd_buffer,
       return;
 
    v3dv_job_start_frame(job, width, height, layers,
-                        false, true, 1, internal_bpp,
+                        false, 1, internal_bpp,
                         4 * v3d_internal_bpp_words(internal_bpp),
                         image->vk.samples > VK_SAMPLE_COUNT_1_BIT);
 

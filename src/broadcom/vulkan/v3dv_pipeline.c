@@ -2303,10 +2303,11 @@ get_cull_enable_mask(struct v3dv_pipeline_stage *p_stage)
    return 0;
 }
 
-static nir_shader *
-pipeline_stage_get_nir(struct v3dv_pipeline_stage *p_stage,
-                       struct v3dv_pipeline *pipeline,
-                       struct v3dv_pipeline_cache *cache)
+/* Sets p_stage->nir from the cache or by compiling the shader module. */
+static VkResult
+pipeline_stage_init_nir(struct v3dv_pipeline_stage *p_stage,
+                        struct v3dv_pipeline *pipeline,
+                        struct v3dv_pipeline_cache *cache)
 {
    int64_t stage_start = os_time_get_nano();
 

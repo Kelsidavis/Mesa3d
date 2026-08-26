@@ -21,7 +21,10 @@
  * IN THE SOFTWARE.
  */
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_bo.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
 #include "broadcom/common/v3d_tiling.h"
 #include "util/box.h"
 #include "vk_format.h"

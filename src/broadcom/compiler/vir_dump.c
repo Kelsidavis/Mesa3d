@@ -137,8 +137,7 @@ vir_dump_uniform(enum quniform_contents contents,
                 break;
 
         case QUNIFORM_BLEND_ENABLED:
-                fprintf(stderr, "blend_enabled[%d]", data);
-                break;
+                return ralloc_asprintf(NULL, "blend_enabled[%d]", data);
 
         default:
                 if (contents < ARRAY_SIZE(quniform_names) &&
