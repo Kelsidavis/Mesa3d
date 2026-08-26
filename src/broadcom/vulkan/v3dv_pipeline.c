@@ -2978,7 +2978,6 @@ pipeline_set_xfb_outputs(struct v3dv_pipeline *pipeline,
    for (uint32_t buffer = 0; buffer < MAX_TF_BUFFERS; buffer++) {
       pipeline->tf.stride[buffer] = xfb->buffers[buffer].stride;
 
-      uint32_t buffer_offset = 0;
       uint32_t vpm_start = slot_count;
 
       for (uint32_t i = 0; i < xfb->output_count; i++) {
@@ -3020,8 +3019,6 @@ pipeline_set_xfb_outputs(struct v3dv_pipeline *pipeline,
          pipeline->tf.specs_psiz[pipeline->tf.num_specs] = spec_psiz;
 
          pipeline->tf.num_specs++;
-
-         buffer_offset = output->offset + num_components * 4;
       }
 
       slot_count += xfb->buffers[buffer].varying_count;
