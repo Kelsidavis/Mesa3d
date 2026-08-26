@@ -2908,6 +2908,12 @@ ntq_emit_inline_ubo_load(struct v3d_compile *c, nir_intrinsic_instr *instr)
         if (c->compiler->max_inline_uniform_buffers <= 0)
                 return false;
 
+        /* An inline UBO is read through its own compile-time uniform, so we
+         * need to know which buffer we are loading from.
+         */
+        if (!nir_src_is_const(instr->src[0]))
+                return false;
+
         /* Regular UBOs start after inline UBOs */
         uint32_t index = nir_src_as_uint(instr->src[0]);
         if (index >= c->compiler->max_inline_uniform_buffers)
@@ -3307,6 +3313,16 @@ ntq_emit_load_unifa(struct v3d_compile *c, nir_intrinsic_instr *instr)
         bool is_uniform = instr->intrinsic == nir_intrinsic_load_uniform;
         bool is_ubo = instr->intrinsic == nir_intrinsic_load_ubo;
         bool is_ssbo = instr->intrinsic == nir_intrinsic_load_ssbo;
+
+        /* For UBO/SSBO loads we read the buffer index below with
+         * nir_src_as_uint() so we can pick the QUNIFORM_UBO_ADDR /
+         * QUNIFORM_SSBO_OFFSET uniform at compile time. That only works if the
+         * index is constant, so let dynamically indexed buffer arrays fall
+         * through to the general TMU path, which selects the address at run
+         * time.
+         */
+        if (!is_uniform && !nir_src_is_const(instr->src[0]))
+                return false;
 
         /* Every ldunifa auto-increments the unifa address by 4 bytes, so our
          * current unifa offset is 4 bytes ahead of the offset of the last load.
