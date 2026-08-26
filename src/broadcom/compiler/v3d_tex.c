@@ -193,6 +193,15 @@ handle_tex_src(struct v3d_compile *c,
                 break;
         }
 
+        case nir_tex_src_texture_offset:
+        case nir_tex_src_sampler_offset:
+                /* The texture and sampler indices are packed into the TMU
+                 * config uniform at compile time, so the hardware can't take
+                 * them from a register. Dynamic indices are lowered to trees
+                 * of constant-index accesses before we get here.
+                 */
+                UNREACHABLE("indirect texture/sampler index not supported");
+
         default:
                 UNREACHABLE("unknown texture source");
         }

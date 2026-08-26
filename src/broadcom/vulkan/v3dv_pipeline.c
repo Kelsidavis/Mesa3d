@@ -290,23 +290,43 @@ deref_has_indirect(nir_deref_instr *deref)
    return false;
 }
 
-/* Get the array length and the indirect index from the first indirect access */
+/* Maximum array length we expand into an if-else tree. Every relevant device
+ * limit (MAX_SAMPLED_IMAGES, MAX_STORAGE_IMAGES, V3D_MAX_TEXTURE_SAMPLERS) is
+ * well below this, so a longer array can't be legally indexed in full anyway.
+ */
+#define V3DV_MAX_INDIRECT_ARRAY_LEN 64
+
+/* Get the array length and the indirect index from the outermost indirect
+ * array access (the one closest to the variable).
+ *
+ * This has to be the outermost one because build_deref_with_const_index() is
+ * the code that consumes it, and that rebuilds the chain starting from the
+ * variable and replaces the first indirect it finds on the way out. Reporting
+ * the innermost index here would make us lower one array dimension while
+ * switching on the index of another.
+ */
 static bool
-get_first_indirect_info(nir_deref_instr *deref,
-                        nir_def **out_index,
-                        uint32_t *out_array_len)
+get_outermost_indirect_info(nir_deref_instr *deref,
+                            nir_def **out_index,
+                            uint32_t *out_array_len)
 {
+   bool found = false;
+
+   /* We walk from the leaf towards the variable, so the last indirect we see
+    * is the outermost one.
+    */
    while (deref->deref_type != nir_deref_type_var) {
       if (deref->deref_type == nir_deref_type_array &&
           !nir_src_is_const(deref->arr.index)) {
          nir_deref_instr *parent = nir_deref_instr_parent(deref);
          *out_array_len = glsl_get_length(parent->type);
          *out_index = deref->arr.index.ssa;
-         return true;
+         found = true;
       }
       deref = nir_deref_instr_parent(deref);
    }
-   return false;
+
+   return found;
 }
 
 /* Build a deref chain replacing the first indirect access with a constant */
@@ -398,23 +418,29 @@ static nir_def *
 emit_indirect_tex_binary_search(nir_builder *b, nir_tex_instr *tex,
                                 nir_deref_instr *tex_deref,
                                 nir_deref_instr *samp_deref,
+                                nir_deref_instr *indirect_deref,
                                 nir_def *index,
                                 int start, int end)
 {
    assert(start < end);
 
    if (start == end - 1) {
-      /* Base case: emit tex with constant index */
+      /* Base case: emit tex with constant index.
+       *
+       * Only the deref we are switching on gets specialized. A separate
+       * texture and sampler array can be indexed with completely different
+       * values, so forcing the other deref to this same constant would sample
+       * with the wrong sampler; we leave it alone and let the fixpoint loop in
+       * v3dv_nir_lower_indirect_tex_derefs() lower it on a later iteration.
+       * In the usual combined image sampler case both derefs are the same
+       * instruction and both get specialized here.
+       */
+      nir_deref_instr *lowered =
+         build_deref_with_const_index(b, indirect_deref, start);
       nir_deref_instr *new_tex_deref =
-         tex_deref ? build_deref_with_const_index(b, tex_deref, start) : NULL;
+         tex_deref == indirect_deref ? lowered : tex_deref;
       nir_deref_instr *new_samp_deref =
-         samp_deref ? build_deref_with_const_index(b, samp_deref, start) : NULL;
-
-      /* Use the original derefs if we didn't need to replace anything */
-      if (!new_tex_deref && tex_deref)
-         new_tex_deref = tex_deref;
-      if (!new_samp_deref && samp_deref)
-         new_samp_deref = samp_deref;
+         samp_deref == indirect_deref ? lowered : samp_deref;
 
       nir_tex_instr *new_tex = clone_tex_with_derefs(b, tex,
                                                      new_tex_deref,
@@ -427,10 +453,12 @@ emit_indirect_tex_binary_search(nir_builder *b, nir_tex_instr *tex,
       nir_push_if(b, nir_ilt_imm(b, index, mid));
       nir_def *then_result = emit_indirect_tex_binary_search(b, tex,
                                                              tex_deref, samp_deref,
+                                                             indirect_deref,
                                                              index, start, mid);
       nir_push_else(b, NULL);
       nir_def *else_result = emit_indirect_tex_binary_search(b, tex,
                                                              tex_deref, samp_deref,
+                                                             indirect_deref,
                                                              index, mid, end);
       nir_pop_if(b, NULL);
 
@@ -463,18 +491,24 @@ lower_tex_deref_to_if_else(nir_builder *b, nir_tex_instr *tex)
 
    /* Prefer texture deref if both have indirects */
    nir_deref_instr *indirect_deref = tex_indirect ? tex_deref : samp_deref;
-   if (!get_first_indirect_info(indirect_deref, &index, &array_len))
+   if (!get_outermost_indirect_info(indirect_deref, &index, &array_len))
       return false;
 
-   /* Limit array size to prevent code explosion */
-   if (array_len > 64)
-      return false;
+   /* Clamp the number of copies we emit rather than bailing out. Bailing out
+    * would leave the dynamic index in place, and v3d_vir_emit_tex() has no way
+    * to consume it: it packs the texture index into the TMU config uniform at
+    * compile time and aborts on nir_tex_src_texture_offset. The binary search
+    * below funnels any index at or past the last element into that element, so
+    * clamping only affects accesses that are already out of bounds.
+    */
+   array_len = MIN2(array_len, V3DV_MAX_INDIRECT_ARRAY_LEN);
 
    b->cursor = nir_before_instr(&tex->instr);
 
    /* Emit the if-else tree using binary search */
    nir_def *result = emit_indirect_tex_binary_search(b, tex,
                                                      tex_deref, samp_deref,
+                                                     indirect_deref,
                                                      index, 0, array_len);
 
    /* Replace original instruction */
@@ -566,12 +600,15 @@ lower_image_deref_to_if_else(nir_builder *b, nir_intrinsic_instr *intrin)
    nir_def *index = NULL;
    uint32_t array_len = 0;
 
-   if (!get_first_indirect_info(deref, &index, &array_len))
+   if (!get_outermost_indirect_info(deref, &index, &array_len))
       return false;
 
-   /* Limit array size to prevent code explosion */
-   if (array_len > 64)
-      return false;
+   /* See the equivalent comment in lower_tex_deref_to_if_else(). For images
+    * bailing out is worse still: lower_image_deref() would drop the dynamic
+    * index on the floor and access the wrong descriptor without any
+    * diagnostic.
+    */
+   array_len = MIN2(array_len, V3DV_MAX_INDIRECT_ARRAY_LEN);
 
    b->cursor = nir_before_instr(&intrin->instr);
 
@@ -650,7 +687,14 @@ v3dv_nir_lower_indirect_tex_derefs(nir_shader *shader)
    bool progress = false;
 
    nir_foreach_function_impl(impl, shader) {
-      if (lower_indirect_tex_derefs_impl(impl))
+      /* Each pass replaces the outermost indirect array index of a deref
+       * chain with constants, which can expose an indirect index in an inner
+       * dimension of the copies it just emitted, so repeat until there is
+       * nothing left to lower. Deref chains are bounded (see
+       * build_deref_with_const_index()) and every iteration removes one
+       * dimension, so this terminates.
+       */
+      while (lower_indirect_tex_derefs_impl(impl))
          progress = true;
    }
 
@@ -1300,6 +1344,15 @@ lower_image_deref(nir_builder *b,
 
    deref = lower_deref_compute_index(b, deref, &base_index, &index,
                                      &array_elements);
+
+   /* v3dv_nir_lower_indirect_tex_derefs() runs before this and turns every
+    * dynamic image array index into a tree of constant-index accesses, so
+    * whatever is left here has to be constant. The backend reads the image
+    * index with nir_src_as_uint(), and the index we compute here is
+    * overwritten by the descriptor index below, so a surviving dynamic index
+    * would silently address the wrong descriptor.
+    */
+   assert(index == NULL);
 
    uint32_t set = deref->var->data.descriptor_set;
    uint32_t binding = deref->var->data.binding;
