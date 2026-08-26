@@ -187,6 +187,14 @@ v3d_get_simulator_file_for_fd(int fd)
 /* 128kb */
 #define GMP_ALIGN2		17
 
+/* The GMP stores 2 permission bits per 128kb page, packed 16 entries to each
+ * 32-bit word, covering the whole 4GB GPU address space.
+ */
+#define GMP_ENTRIES		(1u << (32 - GMP_ALIGN2))
+#define GMP_ENTRIES_PER_WORD	16
+/* 2 bits per entry, so 4 entries per byte: 32768 entries -> 8kb. */
+#define GMP_TABLE_SIZE		(GMP_ENTRIES / 4)
+
 /**
  * Sets the range of GPU virtual address space to have the given GMP
  * permissions (bit 0 = read, bit 1 = write, write-only forbidden).
@@ -198,18 +206,31 @@ set_gmp_flags(struct v3d_simulator_file *file,
         assert((offset & ((1 << GMP_ALIGN2) - 1)) == 0);
         int gmp_offset = offset >> GMP_ALIGN2;
         int gmp_count = align(size, 1 << GMP_ALIGN2) >> GMP_ALIGN2;
-        uint32_t *gmp = malloc((gmp_count + gmp_offset)*sizeof(uint32_t));
-        v3d_hw_read_mem(sim_state.v3d, gmp, file->gmp_addr, (gmp_offset + gmp_count)*sizeof(uint32_t));
 
         assert(flag <= 0x3);
+        assert(gmp_offset + gmp_count <= GMP_ENTRIES);
+
+        /* Entries are packed 16 to a word, so only touch the words those
+         * entries actually span rather than one word per entry.
+         */
+        int first_word = gmp_offset / GMP_ENTRIES_PER_WORD;
+        int last_word = (gmp_offset + gmp_count - 1) / GMP_ENTRIES_PER_WORD;
+        int num_words = last_word - first_word + 1;
+        uint32_t gmp_word_addr = file->gmp_addr + first_word * sizeof(uint32_t);
+
+        uint32_t *gmp = malloc(num_words * sizeof(uint32_t));
+        v3d_hw_read_mem(sim_state.v3d, gmp, gmp_word_addr,
+                        num_words * sizeof(uint32_t));
 
         for (int i = gmp_offset; i < gmp_offset + gmp_count; i++) {
-                int32_t bitshift = (i % 16) * 2;
-                gmp[i / 16] &= ~(0x3 << bitshift);
-                gmp[i / 16] |= flag << bitshift;
+                int32_t bitshift = (i % GMP_ENTRIES_PER_WORD) * 2;
+                int word = i / GMP_ENTRIES_PER_WORD - first_word;
+                gmp[word] &= ~(0x3 << bitshift);
+                gmp[word] |= flag << bitshift;
         }
 
-        v3d_hw_write_mem(sim_state.v3d, file->gmp_addr, gmp, (gmp_offset + gmp_count)*sizeof(uint32_t));
+        v3d_hw_write_mem(sim_state.v3d, gmp_word_addr, gmp,
+                         num_words * sizeof(uint32_t));
         free(gmp);
 }
 
@@ -1246,9 +1267,10 @@ v3d_simulator_init(int fd)
                                 sim_file);
         simple_mtx_unlock(&sim_state.mutex);
 
-        sim_file->gmp = u_mmAllocMem(sim_state.heap, 8096, GMP_ALIGN2, 0);
+        sim_file->gmp = u_mmAllocMem(sim_state.heap, GMP_TABLE_SIZE,
+                                     GMP_ALIGN2, 0);
         sim_file->gmp_addr = sim_file->gmp->ofs;
-        v3d_hw_set_mem(sim_state.v3d, sim_file->gmp_addr, 0, 8096);
+        v3d_hw_set_mem(sim_state.v3d, sim_file->gmp_addr, 0, GMP_TABLE_SIZE);
 
         return sim_file;
 }
