@@ -690,10 +690,14 @@ get_features(const struct v3dv_physical_device *physical_device,
       .legacyVertexAttributes = true,
 
       /* VK_EXT_pipeline_protected_access
-       * Set to false because V3D doesn't support protected memory.
-       * The extension is enabled to advertise the feature struct exists.
+       * This feature only governs whether pipelines can be restricted to
+       * protected or unprotected command buffers; it doesn't require
+       * protectedMemory support, since with protectedMemory == false no
+       * protected command buffers can ever be created and the create flags
+       * are simply inert. We accept VkPipelineCreateFlags2 generically and
+       * don't special-case these bits, so there's nothing else to implement.
        */
-      .pipelineProtectedAccess = false,
+      .pipelineProtectedAccess = true,
 
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
