@@ -948,6 +948,78 @@ pipeline_get_descriptor_map(struct v3dv_pipeline *pipeline,
    }
 }
 
+/* At compile time we need to know if a UBO load is for an inline or a regular
+ * UBO so we can handle inline loads like push constants. That information is
+ * gone at the NIR level, so we rely on the index to tell them apart: inline
+ * buffers live at descriptor map slots 0..MAX_INLINE_UNIFORM_BUFFERS - 1 and
+ * regular UBOs start after them.
+ */
+static uint32_t
+buffer_descriptor_start_index(VkDescriptorType type)
+{
+   if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+       type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+      return MAX_INLINE_UNIFORM_BUFFERS;
+
+   return 0;
+}
+
+static bool
+descriptor_type_is_buffer(VkDescriptorType type)
+{
+   switch (type) {
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* Dynamic indexing of a buffer array needs its descriptors to be contiguous in
+ * the descriptor map, because lower_vulkan_resource_index() below turns the
+ * array index into base_index + i. descriptor_map_add() hands out the first
+ * free slot, so a constant access to the same binding that got there first
+ * would leave the array split around it and the shader would address the wrong
+ * descriptors. Reserve every dynamically indexed array up front, before any
+ * constant access has had the chance to take a slot.
+ */
+static bool
+reserve_dynamic_buffer_arrays_cb(nir_builder *b,
+                                 nir_intrinsic_instr *instr,
+                                 void *_state)
+{
+   if (instr->intrinsic != nir_intrinsic_vulkan_resource_index ||
+       nir_src_is_const(instr->src[0]))
+      return false;
+
+   struct lower_pipeline_layout_state *state = _state;
+   unsigned set = nir_intrinsic_desc_set(instr);
+   unsigned binding = nir_intrinsic_binding(instr);
+   struct v3dv_descriptor_set_layout *set_layout = state->layout->set[set].layout;
+   struct v3dv_descriptor_set_binding_layout *binding_layout =
+      &set_layout->binding[binding];
+
+   if (!descriptor_type_is_buffer(binding_layout->type))
+      return false;
+
+   struct v3dv_descriptor_map *descriptor_map =
+      pipeline_get_descriptor_map(state->pipeline, binding_layout->type,
+                                  b->shader->info.stage, false);
+
+   for (uint32_t i = 0; i < binding_layout->array_size; i++) {
+      descriptor_map_add(descriptor_map, set, binding, i,
+                         binding_layout->array_size,
+                         buffer_descriptor_start_index(binding_layout->type),
+                         true, 0);
+   }
+
+   /* We only populate the descriptor map, the shader is left alone. */
+   return false;
+}
+
 /* Gathers info from the intrinsic (set and binding) and then lowers it so it
  * could be used by the v3d_compiler */
 static void
@@ -976,20 +1048,8 @@ lower_vulkan_resource_index(nir_builder *b,
          pipeline_get_descriptor_map(state->pipeline, binding_layout->type,
                                      b->shader->info.stage, false);
 
-      /* At compile-time we will need to know if we are processing a UBO load
-       * for an inline or a regular UBO so we can handle inline loads like
-       * push constants. At the level of NIR level however, the inline
-       * information is gone, so we rely on the index to make this distinction.
-       * Particularly, we reserve indices 1..MAX_INLINE_UNIFORM_BUFFERS for
-       * inline buffers. This means that at the descriptor map level
-       * we store inline buffers at slots 0..MAX_INLINE_UNIFORM_BUFFERS - 1,
-       * and regular UBOs at indices starting from MAX_INLINE_UNIFORM_BUFFERS.
-       */
-      uint32_t start_index = 0;
-      if (binding_layout->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-          binding_layout->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
-         start_index += MAX_INLINE_UNIFORM_BUFFERS;
-      }
+      uint32_t start_index =
+         buffer_descriptor_start_index(binding_layout->type);
 
       if (const_val) {
          /* Constant index: use direct mapping (existing behavior) */
@@ -1000,8 +1060,12 @@ lower_vulkan_resource_index(nir_builder *b,
                                     true /* sampler_is_32b: doesn't really apply for this case */,
                                     0);
       } else {
-         /* Dynamic index: add all descriptors in the array and return
-          * base index. The backend compiler will add the dynamic offset.
+         /* Inline uniform blocks don't support dynamic indexing */
+         if (binding_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK)
+            UNREACHABLE("dynamic indexing of inline uniform blocks not supported");
+
+         /* Dynamic index: add all descriptors in the array and return the base
+          * index. The backend compiler adds the dynamic offset.
           */
          uint32_t base_index = UINT32_MAX;
          for (uint32_t i = 0; i < binding_layout->array_size; i++) {
@@ -1011,15 +1075,26 @@ lower_vulkan_resource_index(nir_builder *b,
                                                      true, 0);
             if (i == 0)
                base_index = desc_index;
+
+            /* reserve_dynamic_buffer_arrays_cb() ran before us precisely so
+             * that this holds; the index expression below depends on it.
+             */
+            assert(desc_index == base_index + i);
          }
          assert(base_index != UINT32_MAX);
 
-         /* Inline uniform blocks don't support dynamic indexing */
-         if (binding_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK)
-            UNREACHABLE("dynamic indexing of inline uniform blocks not supported");
-
-         /* Build the index expression: base_index + dynamic_offset */
-         nir_def *dynamic_index = nir_iadd_imm(b, instr->src[0].ssa, base_index);
+         /* Build the index expression: base_index + dynamic_offset.
+          *
+          * Clamp first: the descriptor map only has entries for this array, so
+          * an out of bounds index would send the compiler and the driver
+          * looking for a descriptor that isn't there. Vulkan leaves the result
+          * of an out of bounds descriptor index undefined, so any element will
+          * do.
+          */
+         nir_def *array_index =
+            nir_umin(b, instr->src[0].ssa,
+                     nir_imm_int(b, binding_layout->array_size - 1));
+         nir_def *dynamic_index = nir_iadd_imm(b, array_index, base_index);
          nir_def_replace(&instr->def, nir_vec2(b, dynamic_index, nir_imm_int(b, 0)));
          return;
       }
@@ -1332,6 +1407,12 @@ lower_pipeline_layout_info(nir_shader *shader,
       .layout = layout,
       .needs_default_sampler_state = false,
    };
+
+   /* Has to run before the lowering below takes any descriptor map slots, see
+    * reserve_dynamic_buffer_arrays_cb().
+    */
+   nir_shader_intrinsics_pass(shader, reserve_dynamic_buffer_arrays_cb,
+                              nir_metadata_all, &state);
 
    progress = nir_shader_instructions_pass(shader, lower_pipeline_layout_cb,
                                            nir_metadata_control_flow,
@@ -2253,6 +2334,15 @@ pipeline_lower_nir(struct v3dv_pipeline *pipeline,
    bool needs_default_sampler_state = false;
    NIR_PASS(_, p_stage->nir, lower_pipeline_layout_info, pipeline, layout,
             &needs_default_sampler_state);
+
+   /* The lowering above rewrote every buffer index into a descriptor map
+    * index, so the maps are now exactly the range a dynamically indexed
+    * UBO/SSBO load can reach. The compiler needs to know that: it emits one
+    * uniform per buffer it may have to select between, and each of those makes
+    * the driver look up a descriptor at draw time.
+    */
+   p_stage->nir->info.num_ubos = maps->ubo_map.num_desc;
+   p_stage->nir->info.num_ssbos = maps->ssbo_map.num_desc;
 
    /* If in the end we didn't need to use the default sampler states and the
     * shader doesn't need any other samplers, get rid of them so we can
