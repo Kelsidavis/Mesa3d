@@ -415,12 +415,18 @@ opt_constant_mul(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 break;
         }
 
-        /* Unary operations - MOV just copies the constant value */
+        /* A MOV of a constant already produces exactly that constant, so
+         * there is nothing to fold: replacing it with a load of a fresh
+         * uniform holding the same value is an identity rewrite. We used to
+         * do it anyway and report progress, which never converged --
+         * vir_opt_small_immediates() turns the new uniform load back into a
+         * small immediate, vir_opt_dead_code() removes the orphaned load, and
+         * we fold it again on the next round. vir_optimize() loops until no
+         * pass reports progress, so that spun forever and hung the compiler.
+         */
         case V3D_QPU_M_MOV:
         case V3D_QPU_M_FMOV:
-                c->cursor = vir_after_inst(inst);
-                unif = vir_uniform_ui(c, values[0].ui);
-                break;
+                return false;
 
         /* Normalization operations */
         case V3D_QPU_M_FTOUNORM16: {
