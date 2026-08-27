@@ -494,6 +494,67 @@ emit_tmu_general_address_write(struct v3d_compile *c,
         tmu->ldtmu_count = dest_components;
 }
 
+/* Vulkan reserves the lowest UBO indices for inline uniform buffers (see
+ * ntq_emit_inline_ubo_load()), and those can't be dynamically indexed, so a
+ * dynamic index never refers to one. Skipping them also keeps us off the
+ * indices that stay unused when a shader has fewer inline buffers than the
+ * reservation, which the driver has no descriptor for. GL reserves none.
+ */
+static uint32_t
+ntq_first_dynamic_ubo(struct v3d_compile *c)
+{
+        return c->compiler->max_inline_uniform_buffers;
+}
+
+/* A dynamically indexed buffer array can't be resolved at compile time: the
+ * driver patches each of these uniforms with the address or the size of one
+ * specific buffer. So we emit the uniform for every buffer the shader has and
+ * select between them at run time.
+ *
+ * The driver resolves every uniform we emit, not just the one the shader ends
+ * up selecting, so [first_buffer, num_buffers) has to stay within the buffers
+ * it actually set up. Walking past that reads whatever happens to be after its
+ * bookkeeping.
+ */
+static struct qreg
+ntq_select_buffer_uniform(struct v3d_compile *c,
+                          enum quniform_contents contents,
+                          struct qreg buffer_idx,
+                          uint32_t first_buffer,
+                          uint32_t num_buffers,
+                          uint32_t const_offset)
+{
+        /* An index we didn't emit a case for resolves to 0, which is not a
+         * valid buffer. The driver clamps the index so this shouldn't happen.
+         */
+        struct qreg result = vir_uniform_ui(c, 0);
+
+        for (uint32_t i = first_buffer; i < num_buffers; i++) {
+                uint32_t data;
+
+                if (contents == QUNIFORM_UBO_ADDR) {
+                        /* Unit 0 is gallium's constant buffer 0 in GL and the
+                         * push constants UBO in Vulkan, so UBO i is unit i + 1.
+                         */
+                        data = v3d_unit_data_create(i + 1, const_offset);
+                } else {
+                        data = i;
+                }
+
+                struct qreg this_value = vir_uniform(c, contents, data);
+
+                vir_set_pf(c,
+                           vir_XOR_dest(c, vir_nop_reg(), buffer_idx,
+                                        vir_uniform_ui(c, i)),
+                           V3D_QPU_PF_PUSHZ);
+
+                result = vir_MOV(c, vir_SEL(c, V3D_QPU_COND_IFA,
+                                            this_value, result));
+        }
+
+        return result;
+}
+
 /**
  * Implements indirect uniform loads and SSBO accesses through the TMU general
  * memory access interface.
@@ -578,38 +639,16 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                                             v3d_unit_data_create(index, const_offset));
                         const_offset = 0;
                 } else {
-                        /* Dynamic buffer index: emit conditional selection.
-                         * This handles shader*ArrayDynamicIndexing features.
-                         * We load addresses for all possible UBOs and select
-                         * based on the runtime index value using conditional
-                         * moves instead of branches.
+                        /* Dynamic buffer index: select the address at run
+                         * time. This is what makes
+                         * shaderUniformBufferArrayDynamicIndexing work.
                          */
-                        struct qreg dynamic_idx = ntq_get_src(c, instr->src[0], 0);
-
-                        /* Start with address 0 (invalid) as default */
-                        base_offset = vir_uniform_ui(c, 0);
-
-                        /* Check up to 32 possible UBO indices.
-                         * This is a reasonable upper bound for dynamic arrays.
-                         */
-                        for (uint32_t i = 1; i <= 32; i++) {
-                                struct qreg this_addr =
-                                        vir_uniform(c, QUNIFORM_UBO_ADDR,
-                                                    v3d_unit_data_create(i, const_offset));
-
-                                /* Compare dynamic_idx with i and set flags */
-                                vir_set_pf(c,
-                                           vir_XOR_dest(c, vir_nop_reg(),
-                                                        dynamic_idx,
-                                                        vir_uniform_ui(c, i)),
-                                           V3D_QPU_PF_PUSHZ);
-
-                                /* If equal (flag A is set), select this_addr,
-                                 * otherwise keep base_offset */
-                                base_offset = vir_MOV(c, vir_SEL(c, V3D_QPU_COND_IFA,
-                                                                 this_addr,
-                                                                 base_offset));
-                        }
+                        base_offset =
+                                ntq_select_buffer_uniform(c, QUNIFORM_UBO_ADDR,
+                                                          ntq_get_src(c, instr->src[0], 0),
+                                                          ntq_first_dynamic_ubo(c),
+                                                          c->s->info.num_ubos,
+                                                          const_offset);
                         const_offset = 0;
                 }
         } else if (is_shared_or_scratch) {
@@ -639,23 +678,10 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
                                                   nir_src_comp_as_uint(instr->src[idx], 0));
                 } else {
                         /* Dynamic SSBO index: use same approach as dynamic UBOs */
-                        struct qreg dynamic_idx = ntq_get_src(c, instr->src[idx], 0);
-                        base_offset = vir_uniform_ui(c, 0);
-
-                        for (uint32_t i = 0; i < 32; i++) {
-                                struct qreg this_addr =
-                                        vir_uniform(c, QUNIFORM_SSBO_OFFSET, i);
-
-                                vir_set_pf(c,
-                                           vir_XOR_dest(c, vir_nop_reg(),
-                                                        dynamic_idx,
-                                                        vir_uniform_ui(c, i)),
-                                           V3D_QPU_PF_PUSHZ);
-
-                                base_offset = vir_MOV(c, vir_SEL(c, V3D_QPU_COND_IFA,
-                                                                 this_addr,
-                                                                 base_offset));
-                        }
+                        base_offset =
+                                ntq_select_buffer_uniform(c, QUNIFORM_SSBO_OFFSET,
+                                                          ntq_get_src(c, instr->src[idx], 0),
+                                                          0, c->s->info.num_ssbos, 0);
                 }
         }
 
@@ -3702,14 +3728,26 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
         case nir_intrinsic_get_ssbo_size:
                 ntq_store_def(c, &instr->def, 0,
+                              nir_src_is_const(instr->src[0]) ?
                               vir_uniform(c, QUNIFORM_GET_SSBO_SIZE,
-                                          nir_src_comp_as_uint(instr->src[0], 0)));
+                                          nir_src_comp_as_uint(instr->src[0], 0)) :
+                              ntq_select_buffer_uniform(c, QUNIFORM_GET_SSBO_SIZE,
+                                                        ntq_get_src(c, instr->src[0], 0),
+                                                        0, c->s->info.num_ssbos, 0));
                 break;
 
         case nir_intrinsic_get_ubo_size:
+                /* Unlike QUNIFORM_UBO_ADDR, this one takes the plain buffer
+                 * index, so ntq_select_buffer_uniform() doesn't bias it.
+                 */
                 ntq_store_def(c, &instr->def, 0,
+                              nir_src_is_const(instr->src[0]) ?
                               vir_uniform(c, QUNIFORM_GET_UBO_SIZE,
-                                          nir_src_comp_as_uint(instr->src[0], 0)));
+                                          nir_src_comp_as_uint(instr->src[0], 0)) :
+                              ntq_select_buffer_uniform(c, QUNIFORM_GET_UBO_SIZE,
+                                                        ntq_get_src(c, instr->src[0], 0),
+                                                        ntq_first_dynamic_ubo(c),
+                                                        c->s->info.num_ubos, 0));
                 break;
 
         case nir_intrinsic_load_viewport_x_scale:
