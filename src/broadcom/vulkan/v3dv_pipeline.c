@@ -290,23 +290,43 @@ deref_has_indirect(nir_deref_instr *deref)
    return false;
 }
 
-/* Get the array length and the indirect index from the first indirect access */
+/* Maximum array length we expand into an if-else tree. Every relevant device
+ * limit (MAX_SAMPLED_IMAGES, MAX_STORAGE_IMAGES, V3D_MAX_TEXTURE_SAMPLERS) is
+ * well below this, so a longer array can't be legally indexed in full anyway.
+ */
+#define V3DV_MAX_INDIRECT_ARRAY_LEN 64
+
+/* Get the array length and the indirect index from the outermost indirect
+ * array access (the one closest to the variable).
+ *
+ * This has to be the outermost one because build_deref_with_const_index() is
+ * the code that consumes it, and that rebuilds the chain starting from the
+ * variable and replaces the first indirect it finds on the way out. Reporting
+ * the innermost index here would make us lower one array dimension while
+ * switching on the index of another.
+ */
 static bool
-get_first_indirect_info(nir_deref_instr *deref,
-                        nir_def **out_index,
-                        uint32_t *out_array_len)
+get_outermost_indirect_info(nir_deref_instr *deref,
+                            nir_def **out_index,
+                            uint32_t *out_array_len)
 {
+   bool found = false;
+
+   /* We walk from the leaf towards the variable, so the last indirect we see
+    * is the outermost one.
+    */
    while (deref->deref_type != nir_deref_type_var) {
       if (deref->deref_type == nir_deref_type_array &&
           !nir_src_is_const(deref->arr.index)) {
          nir_deref_instr *parent = nir_deref_instr_parent(deref);
          *out_array_len = glsl_get_length(parent->type);
          *out_index = deref->arr.index.ssa;
-         return true;
+         found = true;
       }
       deref = nir_deref_instr_parent(deref);
    }
-   return false;
+
+   return found;
 }
 
 /* Build a deref chain replacing the first indirect access with a constant */
@@ -398,23 +418,29 @@ static nir_def *
 emit_indirect_tex_binary_search(nir_builder *b, nir_tex_instr *tex,
                                 nir_deref_instr *tex_deref,
                                 nir_deref_instr *samp_deref,
+                                nir_deref_instr *indirect_deref,
                                 nir_def *index,
                                 int start, int end)
 {
    assert(start < end);
 
    if (start == end - 1) {
-      /* Base case: emit tex with constant index */
+      /* Base case: emit tex with constant index.
+       *
+       * Only the deref we are switching on gets specialized. A separate
+       * texture and sampler array can be indexed with completely different
+       * values, so forcing the other deref to this same constant would sample
+       * with the wrong sampler; we leave it alone and let the fixpoint loop in
+       * v3dv_nir_lower_indirect_tex_derefs() lower it on a later iteration.
+       * In the usual combined image sampler case both derefs are the same
+       * instruction and both get specialized here.
+       */
+      nir_deref_instr *lowered =
+         build_deref_with_const_index(b, indirect_deref, start);
       nir_deref_instr *new_tex_deref =
-         tex_deref ? build_deref_with_const_index(b, tex_deref, start) : NULL;
+         tex_deref == indirect_deref ? lowered : tex_deref;
       nir_deref_instr *new_samp_deref =
-         samp_deref ? build_deref_with_const_index(b, samp_deref, start) : NULL;
-
-      /* Use the original derefs if we didn't need to replace anything */
-      if (!new_tex_deref && tex_deref)
-         new_tex_deref = tex_deref;
-      if (!new_samp_deref && samp_deref)
-         new_samp_deref = samp_deref;
+         samp_deref == indirect_deref ? lowered : samp_deref;
 
       nir_tex_instr *new_tex = clone_tex_with_derefs(b, tex,
                                                      new_tex_deref,
@@ -427,10 +453,12 @@ emit_indirect_tex_binary_search(nir_builder *b, nir_tex_instr *tex,
       nir_push_if(b, nir_ilt_imm(b, index, mid));
       nir_def *then_result = emit_indirect_tex_binary_search(b, tex,
                                                              tex_deref, samp_deref,
+                                                             indirect_deref,
                                                              index, start, mid);
       nir_push_else(b, NULL);
       nir_def *else_result = emit_indirect_tex_binary_search(b, tex,
                                                              tex_deref, samp_deref,
+                                                             indirect_deref,
                                                              index, mid, end);
       nir_pop_if(b, NULL);
 
@@ -463,18 +491,24 @@ lower_tex_deref_to_if_else(nir_builder *b, nir_tex_instr *tex)
 
    /* Prefer texture deref if both have indirects */
    nir_deref_instr *indirect_deref = tex_indirect ? tex_deref : samp_deref;
-   if (!get_first_indirect_info(indirect_deref, &index, &array_len))
+   if (!get_outermost_indirect_info(indirect_deref, &index, &array_len))
       return false;
 
-   /* Limit array size to prevent code explosion */
-   if (array_len > 64)
-      return false;
+   /* Clamp the number of copies we emit rather than bailing out. Bailing out
+    * would leave the dynamic index in place, and v3d_vir_emit_tex() has no way
+    * to consume it: it packs the texture index into the TMU config uniform at
+    * compile time and aborts on nir_tex_src_texture_offset. The binary search
+    * below funnels any index at or past the last element into that element, so
+    * clamping only affects accesses that are already out of bounds.
+    */
+   array_len = MIN2(array_len, V3DV_MAX_INDIRECT_ARRAY_LEN);
 
    b->cursor = nir_before_instr(&tex->instr);
 
    /* Emit the if-else tree using binary search */
    nir_def *result = emit_indirect_tex_binary_search(b, tex,
                                                      tex_deref, samp_deref,
+                                                     indirect_deref,
                                                      index, 0, array_len);
 
    /* Replace original instruction */
@@ -504,6 +538,14 @@ clone_image_intrin_with_deref(nir_builder *b, nir_intrinsic_instr *intrin,
    /* Copy intrinsic indices */
    memcpy(new_intrin->const_index, intrin->const_index,
           sizeof(intrin->const_index));
+
+   /* Image intrinsics have a variable number of components, which lives in
+    * num_components rather than in the info. nir_intrinsic_instr_create()
+    * leaves it at zero, so without this the clone claims to write no
+    * components while its definition has several, and NIR validation rejects
+    * the shader.
+    */
+   new_intrin->num_components = intrin->num_components;
 
    /* Copy dest if this intrinsic has one */
    if (nir_intrinsic_infos[intrin->intrinsic].has_dest) {
@@ -566,12 +608,15 @@ lower_image_deref_to_if_else(nir_builder *b, nir_intrinsic_instr *intrin)
    nir_def *index = NULL;
    uint32_t array_len = 0;
 
-   if (!get_first_indirect_info(deref, &index, &array_len))
+   if (!get_outermost_indirect_info(deref, &index, &array_len))
       return false;
 
-   /* Limit array size to prevent code explosion */
-   if (array_len > 64)
-      return false;
+   /* See the equivalent comment in lower_tex_deref_to_if_else(). For images
+    * bailing out is worse still: lower_image_deref() would drop the dynamic
+    * index on the floor and access the wrong descriptor without any
+    * diagnostic.
+    */
+   array_len = MIN2(array_len, V3DV_MAX_INDIRECT_ARRAY_LEN);
 
    b->cursor = nir_before_instr(&intrin->instr);
 
@@ -650,7 +695,14 @@ v3dv_nir_lower_indirect_tex_derefs(nir_shader *shader)
    bool progress = false;
 
    nir_foreach_function_impl(impl, shader) {
-      if (lower_indirect_tex_derefs_impl(impl))
+      /* Each pass replaces the outermost indirect array index of a deref
+       * chain with constants, which can expose an indirect index in an inner
+       * dimension of the copies it just emitted, so repeat until there is
+       * nothing left to lower. Deref chains are bounded (see
+       * build_deref_with_const_index()) and every iteration removes one
+       * dimension, so this terminates.
+       */
+      while (lower_indirect_tex_derefs_impl(impl))
          progress = true;
    }
 
@@ -948,6 +1000,78 @@ pipeline_get_descriptor_map(struct v3dv_pipeline *pipeline,
    }
 }
 
+/* At compile time we need to know if a UBO load is for an inline or a regular
+ * UBO so we can handle inline loads like push constants. That information is
+ * gone at the NIR level, so we rely on the index to tell them apart: inline
+ * buffers live at descriptor map slots 0..MAX_INLINE_UNIFORM_BUFFERS - 1 and
+ * regular UBOs start after them.
+ */
+static uint32_t
+buffer_descriptor_start_index(VkDescriptorType type)
+{
+   if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+       type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+      return MAX_INLINE_UNIFORM_BUFFERS;
+
+   return 0;
+}
+
+static bool
+descriptor_type_is_buffer(VkDescriptorType type)
+{
+   switch (type) {
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* Dynamic indexing of a buffer array needs its descriptors to be contiguous in
+ * the descriptor map, because lower_vulkan_resource_index() below turns the
+ * array index into base_index + i. descriptor_map_add() hands out the first
+ * free slot, so a constant access to the same binding that got there first
+ * would leave the array split around it and the shader would address the wrong
+ * descriptors. Reserve every dynamically indexed array up front, before any
+ * constant access has had the chance to take a slot.
+ */
+static bool
+reserve_dynamic_buffer_arrays_cb(nir_builder *b,
+                                 nir_intrinsic_instr *instr,
+                                 void *_state)
+{
+   if (instr->intrinsic != nir_intrinsic_vulkan_resource_index ||
+       nir_src_is_const(instr->src[0]))
+      return false;
+
+   struct lower_pipeline_layout_state *state = _state;
+   unsigned set = nir_intrinsic_desc_set(instr);
+   unsigned binding = nir_intrinsic_binding(instr);
+   struct v3dv_descriptor_set_layout *set_layout = state->layout->set[set].layout;
+   struct v3dv_descriptor_set_binding_layout *binding_layout =
+      &set_layout->binding[binding];
+
+   if (!descriptor_type_is_buffer(binding_layout->type))
+      return false;
+
+   struct v3dv_descriptor_map *descriptor_map =
+      pipeline_get_descriptor_map(state->pipeline, binding_layout->type,
+                                  b->shader->info.stage, false);
+
+   for (uint32_t i = 0; i < binding_layout->array_size; i++) {
+      descriptor_map_add(descriptor_map, set, binding, i,
+                         binding_layout->array_size,
+                         buffer_descriptor_start_index(binding_layout->type),
+                         true, 0);
+   }
+
+   /* We only populate the descriptor map, the shader is left alone. */
+   return false;
+}
+
 /* Gathers info from the intrinsic (set and binding) and then lowers it so it
  * could be used by the v3d_compiler */
 static void
@@ -976,20 +1100,8 @@ lower_vulkan_resource_index(nir_builder *b,
          pipeline_get_descriptor_map(state->pipeline, binding_layout->type,
                                      b->shader->info.stage, false);
 
-      /* At compile-time we will need to know if we are processing a UBO load
-       * for an inline or a regular UBO so we can handle inline loads like
-       * push constants. At the level of NIR level however, the inline
-       * information is gone, so we rely on the index to make this distinction.
-       * Particularly, we reserve indices 1..MAX_INLINE_UNIFORM_BUFFERS for
-       * inline buffers. This means that at the descriptor map level
-       * we store inline buffers at slots 0..MAX_INLINE_UNIFORM_BUFFERS - 1,
-       * and regular UBOs at indices starting from MAX_INLINE_UNIFORM_BUFFERS.
-       */
-      uint32_t start_index = 0;
-      if (binding_layout->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-          binding_layout->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
-         start_index += MAX_INLINE_UNIFORM_BUFFERS;
-      }
+      uint32_t start_index =
+         buffer_descriptor_start_index(binding_layout->type);
 
       if (const_val) {
          /* Constant index: use direct mapping (existing behavior) */
@@ -1000,8 +1112,12 @@ lower_vulkan_resource_index(nir_builder *b,
                                     true /* sampler_is_32b: doesn't really apply for this case */,
                                     0);
       } else {
-         /* Dynamic index: add all descriptors in the array and return
-          * base index. The backend compiler will add the dynamic offset.
+         /* Inline uniform blocks don't support dynamic indexing */
+         if (binding_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK)
+            UNREACHABLE("dynamic indexing of inline uniform blocks not supported");
+
+         /* Dynamic index: add all descriptors in the array and return the base
+          * index. The backend compiler adds the dynamic offset.
           */
          uint32_t base_index = UINT32_MAX;
          for (uint32_t i = 0; i < binding_layout->array_size; i++) {
@@ -1011,15 +1127,26 @@ lower_vulkan_resource_index(nir_builder *b,
                                                      true, 0);
             if (i == 0)
                base_index = desc_index;
+
+            /* reserve_dynamic_buffer_arrays_cb() ran before us precisely so
+             * that this holds; the index expression below depends on it.
+             */
+            assert(desc_index == base_index + i);
          }
          assert(base_index != UINT32_MAX);
 
-         /* Inline uniform blocks don't support dynamic indexing */
-         if (binding_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK)
-            UNREACHABLE("dynamic indexing of inline uniform blocks not supported");
-
-         /* Build the index expression: base_index + dynamic_offset */
-         nir_def *dynamic_index = nir_iadd_imm(b, instr->src[0].ssa, base_index);
+         /* Build the index expression: base_index + dynamic_offset.
+          *
+          * Clamp first: the descriptor map only has entries for this array, so
+          * an out of bounds index would send the compiler and the driver
+          * looking for a descriptor that isn't there. Vulkan leaves the result
+          * of an out of bounds descriptor index undefined, so any element will
+          * do.
+          */
+         nir_def *array_index =
+            nir_umin(b, instr->src[0].ssa,
+                     nir_imm_int(b, binding_layout->array_size - 1));
+         nir_def *dynamic_index = nir_iadd_imm(b, array_index, base_index);
          nir_def_replace(&instr->def, nir_vec2(b, dynamic_index, nir_imm_int(b, 0)));
          return;
       }
@@ -1226,6 +1353,15 @@ lower_image_deref(nir_builder *b,
    deref = lower_deref_compute_index(b, deref, &base_index, &index,
                                      &array_elements);
 
+   /* v3dv_nir_lower_indirect_tex_derefs() runs before this and turns every
+    * dynamic image array index into a tree of constant-index accesses, so
+    * whatever is left here has to be constant. The backend reads the image
+    * index with nir_src_as_uint(), and the index we compute here is
+    * overwritten by the descriptor index below, so a surviving dynamic index
+    * would silently address the wrong descriptor.
+    */
+   assert(index == NULL);
+
    uint32_t set = deref->var->data.descriptor_set;
    uint32_t binding = deref->var->data.binding;
    struct v3dv_descriptor_set_layout *set_layout = state->layout->set[set].layout;
@@ -1332,6 +1468,12 @@ lower_pipeline_layout_info(nir_shader *shader,
       .layout = layout,
       .needs_default_sampler_state = false,
    };
+
+   /* Has to run before the lowering below takes any descriptor map slots, see
+    * reserve_dynamic_buffer_arrays_cb().
+    */
+   nir_shader_intrinsics_pass(shader, reserve_dynamic_buffer_arrays_cb,
+                              nir_metadata_all, &state);
 
    progress = nir_shader_instructions_pass(shader, lower_pipeline_layout_cb,
                                            nir_metadata_control_flow,
@@ -2254,6 +2396,15 @@ pipeline_lower_nir(struct v3dv_pipeline *pipeline,
    NIR_PASS(_, p_stage->nir, lower_pipeline_layout_info, pipeline, layout,
             &needs_default_sampler_state);
 
+   /* The lowering above rewrote every buffer index into a descriptor map
+    * index, so the maps are now exactly the range a dynamically indexed
+    * UBO/SSBO load can reach. The compiler needs to know that: it emits one
+    * uniform per buffer it may have to select between, and each of those makes
+    * the driver look up a descriptor at draw time.
+    */
+   p_stage->nir->info.num_ubos = maps->ubo_map.num_desc;
+   p_stage->nir->info.num_ssbos = maps->ssbo_map.num_desc;
+
    /* If in the end we didn't need to use the default sampler states and the
     * shader doesn't need any other samplers, get rid of them so we can
     * recognize that this program doesn't use any samplers at all.
@@ -2925,7 +3076,6 @@ pipeline_set_xfb_outputs(struct v3dv_pipeline *pipeline,
    for (uint32_t buffer = 0; buffer < MAX_TF_BUFFERS; buffer++) {
       pipeline->tf.stride[buffer] = xfb->buffers[buffer].stride;
 
-      uint32_t buffer_offset = 0;
       uint32_t vpm_start = slot_count;
 
       for (uint32_t i = 0; i < xfb->output_count; i++) {
@@ -2967,8 +3117,6 @@ pipeline_set_xfb_outputs(struct v3dv_pipeline *pipeline,
          pipeline->tf.specs_psiz[pipeline->tf.num_specs] = spec_psiz;
 
          pipeline->tf.num_specs++;
-
-         buffer_offset = output->offset + num_components * 4;
       }
 
       slot_count += xfb->buffers[buffer].varying_count;

@@ -1655,7 +1655,13 @@ nir_instr_as_constant_ubo_load(nir_instr *inst)
         if (intr->intrinsic != nir_intrinsic_load_ubo)
                 return NULL;
 
-        assert(nir_src_is_const(intr->src[0]));
+        /* A dynamically indexed UBO array gives us a load whose buffer index
+         * isn't known until run time, so we can't tell which buffer it reads
+         * and it can't anchor a unifa sequence.
+         */
+        if (!nir_src_is_const(intr->src[0]))
+                return NULL;
+
         if (!nir_src_is_const(intr->src[1]))
                 return NULL;
 
@@ -1709,7 +1715,15 @@ v3d_nir_sort_constant_ubo_load(nir_block *block, nir_intrinsic_instr *ref)
                 }
                 uint32_t offset = nir_src_as_uint(intr->src[1]);
 
-                assert(nir_src_is_const(intr->src[0]));
+                /* We can't prove a run-time buffer index targets a different
+                 * UBO than the reference, so treat it the same as one that
+                 * does and let it break the sequence.
+                 */
+                if (!nir_src_is_const(intr->src[0])) {
+                        seq_break = true;
+                        continue;
+                }
+
                 uint32_t index = nir_src_as_uint(intr->src[0]);
                 if (index != ref_index) {
                        seq_break = true;
@@ -1766,6 +1780,9 @@ v3d_nir_sort_constant_ubo_load(nir_block *block, nir_intrinsic_instr *ref)
                          * sequence.
                          */
                         if (!nir_src_is_const(tmp_intr->src[1]))
+                                break;
+
+                        if (!nir_src_is_const(tmp_intr->src[0]))
                                 break;
 
                         if (nir_src_as_uint(tmp_intr->src[0]) != index)
@@ -3022,6 +3039,13 @@ vir_optimize(struct v3d_compile *c)
         bool print_opt_debug = false;
         int pass = 1;
 
+        /* Two passes can in principle keep undoing each other's work and
+         * report progress forever. Every pass preserves semantics, so
+         * stopping early only costs optimization quality, which is a far
+         * better outcome than hanging the compiler.
+         */
+        const int max_passes = 100;
+
         while (true) {
                 bool progress = false;
 
@@ -3039,7 +3063,12 @@ vir_optimize(struct v3d_compile *c)
                 if (!progress)
                         break;
 
-                pass++;
+                if (pass++ >= max_passes) {
+                        mesa_logd("VIR opt: stopping after %d passes, "
+                                  "optimization passes are not converging\n",
+                                  max_passes);
+                        break;
+                }
         }
 }
 

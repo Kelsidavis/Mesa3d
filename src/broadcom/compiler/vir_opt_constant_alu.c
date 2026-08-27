@@ -415,12 +415,18 @@ opt_constant_mul(struct v3d_compile *c, struct qinst *inst, union fi *values)
                 break;
         }
 
-        /* Unary operations - MOV just copies the constant value */
+        /* A MOV of a constant already produces exactly that constant, so
+         * there is nothing to fold: replacing it with a load of a fresh
+         * uniform holding the same value is an identity rewrite. We used to
+         * do it anyway and report progress, which never converged --
+         * vir_opt_small_immediates() turns the new uniform load back into a
+         * small immediate, vir_opt_dead_code() removes the orphaned load, and
+         * we fold it again on the next round. vir_optimize() loops until no
+         * pass reports progress, so that spun forever and hung the compiler.
+         */
         case V3D_QPU_M_MOV:
         case V3D_QPU_M_FMOV:
-                c->cursor = vir_after_inst(inst);
-                unif = vir_uniform_ui(c, values[0].ui);
-                break;
+                return false;
 
         /* Normalization operations */
         case V3D_QPU_M_FTOUNORM16: {
@@ -550,6 +556,19 @@ try_opt_constant_alu(struct v3d_compile *c, struct qinst *inst)
             inst->qpu.flags.mc != V3D_QPU_COND_NONE) {
                 return false;
         }
+
+        /* These rewrites move the computation between the add and mul pipes,
+         * or replace it outright, but a flag write stays attached to the pipe
+         * it was on. An instruction that pushes or updates flags exists for
+         * that side effect -- often with a null destination, as vir_set_pf()
+         * emits -- so rewriting it silently produces flags from the wrong
+         * result. Leave those alone.
+         */
+        if (inst->qpu.flags.apf != V3D_QPU_PF_NONE ||
+            inst->qpu.flags.mpf != V3D_QPU_PF_NONE ||
+            inst->qpu.flags.auf != V3D_QPU_UF_NONE ||
+            inst->qpu.flags.muf != V3D_QPU_UF_NONE)
+                return false;
 
         assert(vir_get_nsrc(inst) <= 2);
         union fi values[2];
