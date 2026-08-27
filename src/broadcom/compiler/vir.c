@@ -3022,6 +3022,13 @@ vir_optimize(struct v3d_compile *c)
         bool print_opt_debug = false;
         int pass = 1;
 
+        /* Two passes can in principle keep undoing each other's work and
+         * report progress forever. Every pass preserves semantics, so
+         * stopping early only costs optimization quality, which is a far
+         * better outcome than hanging the compiler.
+         */
+        const int max_passes = 100;
+
         while (true) {
                 bool progress = false;
 
@@ -3039,7 +3046,12 @@ vir_optimize(struct v3d_compile *c)
                 if (!progress)
                         break;
 
-                pass++;
+                if (pass++ >= max_passes) {
+                        mesa_logd("VIR opt: stopping after %d passes, "
+                                  "optimization passes are not converging\n",
+                                  max_passes);
+                        break;
+                }
         }
 }
 
