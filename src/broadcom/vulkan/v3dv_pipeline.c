@@ -539,6 +539,14 @@ clone_image_intrin_with_deref(nir_builder *b, nir_intrinsic_instr *intrin,
    memcpy(new_intrin->const_index, intrin->const_index,
           sizeof(intrin->const_index));
 
+   /* Image intrinsics have a variable number of components, which lives in
+    * num_components rather than in the info. nir_intrinsic_instr_create()
+    * leaves it at zero, so without this the clone claims to write no
+    * components while its definition has several, and NIR validation rejects
+    * the shader.
+    */
+   new_intrin->num_components = intrin->num_components;
+
    /* Copy dest if this intrinsic has one */
    if (nir_intrinsic_infos[intrin->intrinsic].has_dest) {
       nir_def_init(&new_intrin->instr, &new_intrin->def,
