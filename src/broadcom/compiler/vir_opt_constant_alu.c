@@ -557,6 +557,19 @@ try_opt_constant_alu(struct v3d_compile *c, struct qinst *inst)
                 return false;
         }
 
+        /* These rewrites move the computation between the add and mul pipes,
+         * or replace it outright, but a flag write stays attached to the pipe
+         * it was on. An instruction that pushes or updates flags exists for
+         * that side effect -- often with a null destination, as vir_set_pf()
+         * emits -- so rewriting it silently produces flags from the wrong
+         * result. Leave those alone.
+         */
+        if (inst->qpu.flags.apf != V3D_QPU_PF_NONE ||
+            inst->qpu.flags.mpf != V3D_QPU_PF_NONE ||
+            inst->qpu.flags.auf != V3D_QPU_UF_NONE ||
+            inst->qpu.flags.muf != V3D_QPU_UF_NONE)
+                return false;
+
         assert(vir_get_nsrc(inst) <= 2);
         union fi values[2];
         for (int i = 0; i < vir_get_nsrc(inst); i++) {
