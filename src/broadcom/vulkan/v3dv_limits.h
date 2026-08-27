@@ -46,6 +46,7 @@
 #define MAX_SETS 16
 
 #define MAX_PUSH_CONSTANTS_SIZE 256
+#define MAX_PUSH_DESCRIPTORS 32
 
 #define MAX_SAMPLED_IMAGES 16
 #define MAX_STORAGE_IMAGES 4
@@ -62,6 +63,10 @@
                              MAX_DYNAMIC_STORAGE_BUFFERS)
 
 #define MAX_MULTIVIEW_VIEW_COUNT 16
+
+/* Transform feedback limits */
+#define MAX_TF_BUFFERS 4
+#define MAX_TF_STREAMS 1  /* Only stream 0 is supported without geometry shaders */
 
 #define V3DV_SUPPORTED_SHADER_STAGES 4
 

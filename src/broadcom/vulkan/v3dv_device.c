@@ -83,7 +83,7 @@
 #define V3D_VERSION 42
 #include "v3dv_format_table.h"
 
-#define V3DV_API_VERSION VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION)
+#define V3DV_API_VERSION VK_MAKE_VERSION(1, 4, VK_HEADER_VERSION)
 
 #ifdef ANDROID_STRICT
 #if ANDROID_API_LEVEL <= 32
@@ -181,6 +181,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_descriptor_update_template       = true,
       .KHR_depth_stencil_resolve            = true,
       .KHR_dynamic_rendering                = true,
+      .KHR_dynamic_rendering_local_read    = true,
       .KHR_external_fence                   = true,
       .KHR_external_fence_fd                = true,
       .KHR_external_memory                  = true,
@@ -202,12 +203,22 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_maintenance3                     = true,
       .KHR_maintenance4                     = true,
       .KHR_maintenance5                     = true,
+      .KHR_maintenance6                     = true,
+      .KHR_maintenance7                     = true,
+      .KHR_maintenance8                     = true,
+      .KHR_maintenance9                     = true,
+      .KHR_maintenance10                    = true,
+      .KHR_map_memory2                      = true,
+      .KHR_push_descriptor                  = true,
+      .KHR_global_priority                  = true,
+      .KHR_shader_subgroup_uniform_control_flow = true,
       .KHR_multiview                        = true,
       .KHR_pipeline_executable_properties   = true,
       .KHR_separate_depth_stencil_layouts   = true,
       .KHR_shader_expect_assume             = true,
       .KHR_shader_float16_int8              = device->devinfo.ver >= 71,
       .KHR_shader_float_controls            = true,
+      .KHR_shader_float_controls2           = true,
       .KHR_shader_maximal_reconvergence     = true,
       .KHR_shader_non_semantic_info         = true,
       .KHR_shader_quad_control              = device->devinfo.ver >= 71,
@@ -240,6 +251,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats                     = true,
       .EXT_attachment_feedback_loop_layout  = true,
+      .EXT_attachment_feedback_loop_dynamic_state = true,
       .EXT_border_color_swizzle             = true,
       .EXT_color_write_enable               = true,
       .EXT_custom_border_color              = true,
@@ -248,24 +260,34 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_depth_clip_control               = true,
       .EXT_depth_clip_enable                = device->devinfo.ver >= 71,
       .EXT_device_memory_report             = true,
+      .EXT_dynamic_rendering_unused_attachments = true,
       .EXT_load_store_op_none               = true,
       .EXT_inline_uniform_block             = true,
       .EXT_extended_dynamic_state           = true,
       .EXT_extended_dynamic_state2          = true,
+      .EXT_extended_dynamic_state3          = true,
       .EXT_external_memory_dma_buf          = true,
+      .EXT_external_memory_acquire_unmodified = true,
+      .EXT_global_priority                  = true,
+      .EXT_global_priority_query            = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .EXT_hdr_metadata                     = true,
 #endif
+      .EXT_host_image_copy                  = true,
       .EXT_host_query_reset                 = true,
       .EXT_image_drm_format_modifier        = true,
       .EXT_image_robustness                 = true,
+      .EXT_image_sliced_view_of_3d          = true,
       .EXT_index_type_uint8                 = true,
+      .EXT_legacy_dithering                 = true,
+      .EXT_legacy_vertex_attributes         = true,
       .EXT_line_rasterization               = true,
       .EXT_memory_budget                    = true,
       .EXT_multi_draw                       = true,
       .EXT_physical_device_drm              = true,
       .EXT_pipeline_creation_cache_control  = true,
       .EXT_pipeline_creation_feedback       = true,
+      .EXT_pipeline_protected_access        = true,
       .EXT_pipeline_robustness              = true,
       .EXT_robustness2                      = true,
       .EXT_primitive_topology_list_restart  = true,
@@ -276,13 +298,17 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_separate_stencil_usage           = true,
       .EXT_shader_demote_to_helper_invocation = true,
       .EXT_shader_module_identifier         = true,
+      .EXT_shader_replicated_composites     = true,
       .EXT_subgroup_size_control            = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .EXT_swapchain_maintenance1           = true,
 #endif
       .EXT_texel_buffer_alignment           = true,
       .EXT_tooling_info                     = true,
+      .EXT_transform_feedback               = true,
       .EXT_vertex_attribute_divisor         = true,
+      .EXT_ycbcr_image_arrays               = true,
+      .EXT_ycbcr_2plane_444_formats         = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(device->vk.instance, &v3dv_instance->drirc.options),
 #endif
@@ -314,8 +340,6 @@ static void
 get_features(const struct v3dv_physical_device *physical_device,
              struct vk_features *features)
 {
-   const bool webgpu = v3dv_webgpu_override_enabled();
-
    *features = (struct vk_features) {
       /* Vulkan 1.0 */
       .robustBufferAccess = true, /* This feature is mandatory */
@@ -327,7 +351,7 @@ get_features(const struct v3dv_physical_device *physical_device,
       .sampleRateShading = true,
       .dualSrcBlend = true,
       .logicOp = true,
-      .multiDrawIndirect = false,
+      .multiDrawIndirect = true,
       .drawIndirectFirstInstance = true,
       .depthClamp = physical_device->devinfo.ver >= 71,
       .depthClampZeroOne = physical_device->devinfo.ver >= 71,
@@ -347,7 +371,7 @@ get_features(const struct v3dv_physical_device *physical_device,
        */
       .textureCompressionBC = false,
       .occlusionQueryPrecise = true,
-      .pipelineStatisticsQuery = false,
+      .pipelineStatisticsQuery = true,
       .vertexPipelineStoresAndAtomics = true,
       .fragmentStoresAndAtomics = true,
       .shaderTessellationAndGeometryPointSize = true,
@@ -356,16 +380,12 @@ get_features(const struct v3dv_physical_device *physical_device,
       .shaderStorageImageMultisample = false,
       .shaderStorageImageReadWithoutFormat = true,
       .shaderStorageImageWriteWithoutFormat = false,
-      /* Next four features are not actually implemented yet; advertise them
-       * only under V3D_WEBGPU_OVERRIDE=1 so Dawn/WebGPU setups can claim they
-       * are available. Debug build will assert if feature is really used.
-       */
-      .shaderUniformBufferArrayDynamicIndexing = webgpu,
-      .shaderSampledImageArrayDynamicIndexing = webgpu,
-      .shaderStorageBufferArrayDynamicIndexing = webgpu,
-      .shaderStorageImageArrayDynamicIndexing = webgpu,
+      .shaderUniformBufferArrayDynamicIndexing = true,
+      .shaderSampledImageArrayDynamicIndexing = true,
+      .shaderStorageBufferArrayDynamicIndexing = true,
+      .shaderStorageImageArrayDynamicIndexing = true,
       .shaderClipDistance = true,
-      .shaderCullDistance = false,
+      .shaderCullDistance = true,
       .shaderFloat16 = physical_device->devinfo.ver >= 71,
       .shaderFloat64 = false,
       .shaderInt64 = false,
@@ -393,11 +413,10 @@ get_features(const struct v3dv_physical_device *physical_device,
       .multiviewGeometryShader = false,
       .multiviewTessellationShader = false,
       .variablePointersStorageBuffer = true,
-      /* FIXME: this needs support for non-constant index on UBO/SSBO */
-      .variablePointers = false,
+      .variablePointers = true,
       .protectedMemory = false,
       .samplerYcbcrConversion = true,
-      .shaderDrawParameters = false,
+      .shaderDrawParameters = true,
 
       /* Vulkan 1.2 */
       .hostQueryReset = true,
@@ -501,37 +520,72 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_extended_dynamic_state2 */
       .extendedDynamicState2 = true,
-      /* We don't support extendedDynamicState2LogicOp as that would require
-       * compile shader variants after the pipeline creation.
-       */
-      .extendedDynamicState2LogicOp = false,
+      /* Dynamic logic op function is supported via runtime uniform. */
+      .extendedDynamicState2LogicOp = true,
       /* We don't support extendedDynamicState2PatchControlPoints as we don't
        * support Tessellation Shaders
        */
       .extendedDynamicState2PatchControlPoints = false,
+
+      /* VK_EXT_extended_dynamic_state3 */
+      .extendedDynamicState3PolygonMode = true,
+      .extendedDynamicState3TessellationDomainOrigin = false, /* no tessellation */
+      .extendedDynamicState3RasterizationStream = false, /* no geometry shaders */
+      .extendedDynamicState3LineStippleEnable = false, /* no stipple support */
+      .extendedDynamicState3LineRasterizationMode = true,
+      .extendedDynamicState3LogicOpEnable = true,
+      .extendedDynamicState3AlphaToOneEnable = true,
+      .extendedDynamicState3DepthClipEnable = physical_device->devinfo.ver >= 71,
+      .extendedDynamicState3DepthClampEnable = physical_device->devinfo.ver >= 71,
+      .extendedDynamicState3DepthClipNegativeOneToOne = physical_device->devinfo.ver >= 71,
+      .extendedDynamicState3ProvokingVertexMode = true,
+      .extendedDynamicState3ColorBlendEnable = true,
+      .extendedDynamicState3ColorWriteMask = true,
+      .extendedDynamicState3ColorBlendEquation = true,
+      .extendedDynamicState3SampleLocationsEnable = false, /* not supported */
+      .extendedDynamicState3SampleMask = true,
+      .extendedDynamicState3ConservativeRasterizationMode = false, /* not supported */
+      .extendedDynamicState3AlphaToCoverageEnable = true,
+      .extendedDynamicState3RasterizationSamples = false, /* complex, affects shaders */
+      .extendedDynamicState3ExtraPrimitiveOverestimationSize = false,
+      .extendedDynamicState3ViewportWScalingEnable = false,
+      .extendedDynamicState3ViewportSwizzle = false,
+      .extendedDynamicState3ShadingRateImageEnable = false,
+      .extendedDynamicState3CoverageToColorEnable = false,
+      .extendedDynamicState3CoverageToColorLocation = false,
+      .extendedDynamicState3CoverageModulationMode = false,
+      .extendedDynamicState3CoverageModulationTableEnable = false,
+      .extendedDynamicState3CoverageModulationTable = false,
+      .extendedDynamicState3CoverageReductionMode = false,
+      .extendedDynamicState3RepresentativeFragmentTestEnable = false,
+      .extendedDynamicState3ColorBlendAdvanced = false,
 
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
 
       /* VK_EXT_provoking_vertex */
       .provokingVertexLast = true,
-      /* FIXME: update when supporting EXT_transform_feedback */
-      .transformFeedbackPreservesProvokingVertex = false,
+      .transformFeedbackPreservesProvokingVertex = true,
+
+      /* VK_EXT_transform_feedback */
+      .transformFeedback = true,
+      .geometryStreams = false,  /* requires geometry shaders */
 
       /* VK_EXT_vertex_attribute_divisor */
       .vertexAttributeInstanceRateDivisor = true,
-      .vertexAttributeInstanceRateZeroDivisor = false,
+      .vertexAttributeInstanceRateZeroDivisor = true,
 
       /* VK_KHR_performance_query */
       .performanceCounterQueryPools = v3d_has_feature(physical_device, DRM_V3D_PARAM_SUPPORTS_PERFMON),
-      .performanceCounterMultipleQueryPools = false,
+      .performanceCounterMultipleQueryPools = v3d_has_feature(physical_device, DRM_V3D_PARAM_SUPPORTS_PERFMON),
 
       /* VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
 
       /* VK_KHR_workgroup_memory_explicit_layout */
       .workgroupMemoryExplicitLayout = true,
-      .workgroupMemoryExplicitLayoutScalarBlockLayout = false,
+      /* Same V3D 7.1 requirement as scalarBlockLayout for TMU alignment */
+      .workgroupMemoryExplicitLayoutScalarBlockLayout = physical_device->devinfo.ver >= 71,
       .workgroupMemoryExplicitLayout8BitAccess = true,
       .workgroupMemoryExplicitLayout16BitAccess = true,
 
@@ -551,8 +605,14 @@ get_features(const struct v3dv_physical_device *physical_device,
       /* VK_EXT_device_memory_report */
       .deviceMemoryReport = true,
 
+      /* VK_EXT_image_sliced_view_of_3d */
+      .imageSlicedViewOf3D = true,
+
       /* VK_EXT_attachment_feedback_loop_layout */
       .attachmentFeedbackLoopLayout = true,
+
+      /* VK_EXT_attachment_feedback_loop_dynamic_state */
+      .attachmentFeedbackLoopDynamicState = true,
 
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,
@@ -571,6 +631,9 @@ get_features(const struct v3dv_physical_device *physical_device,
       /* VK_EXT_shader_demote_to_helper_invocation */
       .shaderDemoteToHelperInvocation = true,
 
+      /* VK_EXT_shader_replicated_composites */
+      .shaderReplicatedComposites = true,
+
       /* VK_EXT_subgroup_size_control */
       .subgroupSizeControl = true,
       .computeFullSubgroups = true,
@@ -581,8 +644,60 @@ get_features(const struct v3dv_physical_device *physical_device,
       /* VK_KHR_dynamic_rendering */
       .dynamicRendering = true,
 
+      /* VK_KHR_dynamic_rendering_local_read */
+      .dynamicRenderingLocalRead = true,
+
+      /* VK_EXT_dynamic_rendering_unused_attachments */
+      .dynamicRenderingUnusedAttachments = true,
+
       /* VK_KHR_maintenance5 */
       .maintenance5 = true,
+
+      /* VK_KHR_maintenance6 */
+      .maintenance6 = true,
+
+      /* VK_KHR_maintenance7 */
+      .maintenance7 = true,
+
+      /* VK_KHR_maintenance8 */
+      .maintenance8 = true,
+
+      /* VK_KHR_maintenance9 */
+      .maintenance9 = true,
+
+      /* VK_KHR_maintenance10 */
+      .maintenance10 = true,
+
+      /* VK_KHR_push_descriptor */
+      .pushDescriptor = true,
+
+      /* VK_KHR_global_priority / VK_EXT_global_priority_query */
+      .globalPriorityQuery = true,
+
+      /* VK_KHR_shader_subgroup_uniform_control_flow */
+      .shaderSubgroupUniformControlFlow = true,
+
+      /* VK_KHR_shader_float_controls2 */
+      .shaderFloatControls2 = true,
+
+      /* VK_EXT_host_image_copy */
+      .hostImageCopy = true,
+
+      /* VK_EXT_legacy_dithering */
+      .legacyDithering = true,
+
+      /* VK_EXT_legacy_vertex_attributes */
+      .legacyVertexAttributes = true,
+
+      /* VK_EXT_pipeline_protected_access
+       * This feature only governs whether pipelines can be restricted to
+       * protected or unprotected command buffers; it doesn't require
+       * protectedMemory support, since with protectedMemory == false no
+       * protected command buffers can ever be created and the create flags
+       * are simply inert. We accept VkPipelineCreateFlags2 generically and
+       * don't special-case these bits, so there's nothing else to implement.
+       */
+      .pipelineProtectedAccess = true,
 
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
@@ -613,6 +728,12 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
+
+      /* VK_EXT_ycbcr_image_arrays */
+      .ycbcrImageArrays = true,
+
+      /* VK_EXT_ycbcr_2plane_444_formats */
+      .ycbcr2plane444Formats = true,
    };
 }
 
@@ -1161,7 +1282,7 @@ get_device_properties(const struct v3dv_physical_device *device,
       .timestampComputeAndGraphics              = true,
       .timestampPeriod                          = timestamp_period,
       .maxClipDistances                         = 8,
-      .maxCullDistances                         = 0,
+      .maxCullDistances                         = 8,
       .maxCombinedClipAndCullDistances          = 8,
       .discreteQueuePriorities                  = 2,
       .pointSizeRange                           = { v3d_point_line_granularity,
@@ -1207,22 +1328,11 @@ get_device_properties(const struct v3dv_physical_device *device,
       },
       .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
       .supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
-      /* FIXME: if we want to support independentResolveNone then we would
-       * need to honor attachment load operations on resolve attachments,
-       * which we currently ignore because the resolve makes them irrelevant,
-       * as it unconditionally writes all pixels in the render area. However,
-       * with independentResolveNone, it is possible to have one aspect of a
-       * D/S resolve attachment stay unresolved, in which case the attachment
-       * load operation is relevant.
-       *
-       * NOTE: implementing attachment load for resolve attachments isn't
-       * immediately trivial because these attachments are not part of the
-       * framebuffer and therefore we can't use the same mechanism we use
-       * for framebuffer attachments. Instead, we should probably have to
-       * emit a meta operation for that right at the start of the render
-       * pass (or subpass).
+      /* We support independentResolveNone by emitting a separate TLB clear
+       * job at subpass start for non-resolved D/S aspects when their loadOp
+       * is CLEAR. See cmd_buffer_emit_non_resolved_ds_aspect_clear().
        */
-      .independentResolveNone = false,
+      .independentResolveNone = true,
       .independentResolve = false,
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
 
@@ -1325,8 +1435,19 @@ get_device_properties(const struct v3dv_physical_device *device,
 
       /* VkPhysicalDeviceProvokingVertexPropertiesEXT */
       .provokingVertexModePerPipeline = true,
-      /* FIXME: update when supporting EXT_transform_feedback */
-      .transformFeedbackPreservesTriangleFanProvokingVertex = false,
+      .transformFeedbackPreservesTriangleFanProvokingVertex = true,
+
+      /* VkPhysicalDeviceTransformFeedbackPropertiesEXT */
+      .maxTransformFeedbackStreams = MAX_TF_STREAMS,
+      .maxTransformFeedbackBuffers = MAX_TF_BUFFERS,
+      .maxTransformFeedbackBufferSize = UINT32_MAX,
+      .maxTransformFeedbackStreamDataSize = 512,
+      .maxTransformFeedbackBufferDataSize = 512,
+      .maxTransformFeedbackBufferDataStride = 2048,
+      .transformFeedbackQueries = true,
+      .transformFeedbackStreamsLinesTriangles = true,
+      .transformFeedbackRasterizationStreamSelect = false,
+      .transformFeedbackDraw = true,
 
       /* VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT */
       .maxVertexAttribDivisor = V3D_MAX_VERTEX_ATTRIB_DIVISOR,
@@ -1385,7 +1506,66 @@ get_device_properties(const struct v3dv_physical_device *device,
       .polygonModePointSize = true,
       .nonStrictSinglePixelWideLinesUseParallelogram = true,
       .nonStrictWideLinesUseParallelogram = true,
+
+      /* VK_KHR_maintenance6 */
+      .maxCombinedImageSamplerDescriptorCount = 1,
+
+      /* VK_KHR_maintenance7 */
+      .robustFragmentShadingRateAttachmentAccess = false,
+      .separateDepthStencilAttachmentAccess = true,
+      .maxDescriptorSetTotalUniformBuffersDynamic = MAX_DYNAMIC_UNIFORM_BUFFERS,
+      .maxDescriptorSetTotalStorageBuffersDynamic = MAX_DYNAMIC_STORAGE_BUFFERS,
+      .maxDescriptorSetTotalBuffersDynamic = MAX_DYNAMIC_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalUniformBuffersDynamic = MAX_DYNAMIC_UNIFORM_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalStorageBuffersDynamic = MAX_DYNAMIC_STORAGE_BUFFERS,
+      .maxDescriptorSetUpdateAfterBindTotalBuffersDynamic = MAX_DYNAMIC_BUFFERS,
+
+      /* VK_KHR_maintenance9 */
+      .image2DViewOf3DSparse = false,
+      .defaultVertexAttributeValue = VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ONE_KHR,
+
+      /* VK_KHR_maintenance10 */
+      .rgba4OpaqueBlackSwizzled = true,
+      .resolveSrgbFormatAppliesTransferFunction = true,
+      .resolveSrgbFormatSupportsTransferFunctionControl = false,
+
+      /* VK_EXT_legacy_vertex_attributes */
+      .nativeUnalignedPerformance = true,
+
+      /* VK_KHR_push_descriptor */
+      .maxPushDescriptors = 32,
+
+      /* VK_KHR_dynamic_rendering_local_read */
+      .dynamicRenderingLocalReadDepthStencilAttachments = false,
+      .dynamicRenderingLocalReadMultisampledAttachments = true,
    };
+
+   /* VK_EXT_host_image_copy - supported layouts for host copies.
+    * V3D handles tiling internally so we support all common layouts.
+    */
+   static const VkImageLayout v3dv_host_copy_layouts[] = {
+      VK_IMAGE_LAYOUT_GENERAL,
+      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL,
+      VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+      VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+   };
+   properties->pCopySrcLayouts = (VkImageLayout *) v3dv_host_copy_layouts;
+   properties->copySrcLayoutCount = ARRAY_SIZE(v3dv_host_copy_layouts);
+   properties->pCopyDstLayouts = (VkImageLayout *) v3dv_host_copy_layouts;
+   properties->copyDstLayoutCount = ARRAY_SIZE(v3dv_host_copy_layouts);
+   /* Use driver UUID for optimal tiling - all V3D uses same tiling */
+   memcpy(properties->optimalTilingLayoutUUID, device->driver_uuid, VK_UUID_SIZE);
+   properties->identicalMemoryTypeRequirements = true;
 
    /* VkPhysicalDeviceShaderModuleIdentifierPropertiesEXT */
    STATIC_ASSERT(sizeof(vk_shaderModuleIdentifierAlgorithmUUID) ==
@@ -1792,6 +1972,17 @@ v3dv_queue_family_properties = {
    .minImageTransferGranularity = { 1, 1, 1 },
 };
 
+/* Supported global queue priorities for VK_KHR_global_priority.
+ * V3D doesn't have kernel-level priority support, but we accept all
+ * priorities for compatibility. MEDIUM is the effective priority.
+ */
+static const VkQueueGlobalPriorityKHR v3dv_global_queue_priorities[] = {
+   VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR,
+   VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR,
+   VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR,
+   VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR,
+};
+
 VKAPI_ATTR void VKAPI_CALL
 v3dv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
                                              uint32_t *pQueueFamilyPropertyCount,
@@ -1804,7 +1995,20 @@ v3dv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
       p->queueFamilyProperties = v3dv_queue_family_properties;
 
       vk_foreach_struct(sType, s, p->pNext) {
-         vk_debug_ignored_stype(sType);
+         switch (sType) {
+         case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
+            VkQueueFamilyGlobalPriorityPropertiesKHR *priority_props =
+               (VkQueueFamilyGlobalPriorityPropertiesKHR *) s;
+            priority_props->priorityCount = ARRAY_SIZE(v3dv_global_queue_priorities);
+            assert(priority_props->priorityCount <= VK_MAX_GLOBAL_PRIORITY_SIZE_KHR);
+            memcpy(priority_props->priorities, v3dv_global_queue_priorities,
+                   sizeof(v3dv_global_queue_priorities));
+            break;
+         }
+         default:
+            vk_debug_ignored_stype(sType);
+            break;
+         }
       }
    }
 }
@@ -2109,6 +2313,8 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
    }
    util_dynarray_init(&device->device_address_bo_list,
                       device->device_address_mem_ctx);
+   util_dynarray_init(&device->device_address_bo_handles,
+                      device->device_address_mem_ctx);
 
    result = v3dv_event_allocate_resources(device);
    if (result != VK_SUCCESS)
@@ -2171,6 +2377,24 @@ v3dv_DestroyDevice(VkDevice _device,
    v3dv_query_free_resources(device);
 
    destroy_device_meta(device);
+
+   /* Clean up transform feedback draw resources */
+   if (device->tf_draw.pipeline) {
+      v3dv_DestroyPipeline(v3dv_device_to_handle(device),
+                           device->tf_draw.pipeline,
+                           &device->vk.alloc);
+   }
+   if (device->tf_draw.pipeline_layout) {
+      v3dv_DestroyPipelineLayout(v3dv_device_to_handle(device),
+                                 device->tf_draw.pipeline_layout,
+                                 &device->vk.alloc);
+   }
+   if (device->tf_draw.descriptor_set_layout) {
+      v3dv_DestroyDescriptorSetLayout(v3dv_device_to_handle(device),
+                                      device->tf_draw.descriptor_set_layout,
+                                      &device->vk.alloc);
+   }
+
    v3dv_pipeline_cache_finish(&device->default_pipeline_cache);
 
    if (device->default_attribute_float) {
@@ -2388,15 +2612,35 @@ device_add_device_address_bo(struct v3dv_device *device,
                                   struct v3dv_bo *bo)
 {
    util_dynarray_append(&device->device_address_bo_list, bo);
+   util_dynarray_append(&device->device_address_bo_handles, bo->handle);
 }
 
 static void
 device_remove_device_address_bo(struct v3dv_device *device,
                                 struct v3dv_bo *bo)
 {
+   /* Find the index of the BO being removed so we can remove the
+    * corresponding handle at the same index.
+    */
+   uint32_t idx = 0;
+   util_dynarray_foreach(&device->device_address_bo_list,
+                         struct v3dv_bo *, iter) {
+      if (*iter == bo)
+         break;
+      idx++;
+   }
+
    util_dynarray_delete_unordered(&device->device_address_bo_list,
                                   struct v3dv_bo *,
                                   bo);
+
+   /* Remove the handle at the same index by swapping with the last element */
+   uint32_t *handles = util_dynarray_begin(&device->device_address_bo_handles);
+   uint32_t count = util_dynarray_num_elements(&device->device_address_bo_handles,
+                                               uint32_t);
+   if (idx < count - 1)
+      handles[idx] = handles[count - 1];
+   device->device_address_bo_handles.size -= sizeof(uint32_t);
 }
 
 static void
@@ -2605,6 +2849,28 @@ v3dv_UnmapMemory(VkDevice _device,
       return;
 
    device_unmap(device, mem);
+}
+
+/* VK_KHR_map_memory2 */
+VKAPI_ATTR VkResult VKAPI_CALL
+v3dv_MapMemory2KHR(VkDevice _device,
+                   const VkMemoryMapInfoKHR *pMemoryMapInfo,
+                   void **ppData)
+{
+   return v3dv_MapMemory(_device,
+                         pMemoryMapInfo->memory,
+                         pMemoryMapInfo->offset,
+                         pMemoryMapInfo->size,
+                         pMemoryMapInfo->flags,
+                         ppData);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+v3dv_UnmapMemory2KHR(VkDevice _device,
+                     const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo)
+{
+   v3dv_UnmapMemory(_device, pMemoryUnmapInfo->memory);
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

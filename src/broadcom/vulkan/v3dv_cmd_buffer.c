@@ -28,6 +28,8 @@
 #include "v3dv_entrypoints.h"
 #include "v3dv_version_dispatch.h"
 #include "vk_format.h"
+#include "v3dv_meta_common.h"
+#include "compiler/nir/nir_builder.h"
 #include "util/perf/cpu_trace.h"
 #include "util/u_pack_color.h"
 #include "vk_common_entrypoints.h"
@@ -296,6 +298,16 @@ cmd_buffer_free_resources(struct v3dv_cmd_buffer *cmd_buffer)
       v3dv_bo_free(cmd_buffer->device,
                    cmd_buffer->push_constants_resource.bo, 0);
 
+   /* Free push descriptor sets */
+   if (cmd_buffer->state.gfx.descriptor_state.push_set.set) {
+      vk_free(&cmd_buffer->device->vk.alloc,
+              cmd_buffer->state.gfx.descriptor_state.push_set.set);
+   }
+   if (cmd_buffer->state.compute.descriptor_state.push_set.set) {
+      vk_free(&cmd_buffer->device->vk.alloc,
+              cmd_buffer->state.compute.descriptor_state.push_set.set);
+   }
+
    list_for_each_entry_safe(struct v3dv_cmd_buffer_private_obj, pobj,
                             &cmd_buffer->private_objs, list_link) {
       cmd_buffer_destroy_private_obj(cmd_buffer, pobj);
@@ -376,15 +388,52 @@ cmd_buffer_can_merge_subpass(struct v3dv_cmd_buffer *cmd_buffer,
    if (subpass->view_mask != prev_subpass->view_mask)
       return false;
 
-   /* FIXME: Since some attachment formats can't be resolved using the TLB we
-    * need to emit separate resolve jobs for them and that would not be
-    * compatible with subpass merges. We could fix that by testing if any of
-    * the attachments to resolve doesn't support TLB resolves.
+   /* If any attachment has a resolve that can't use the TLB, we need to emit
+    * separate resolve jobs which is incompatible with subpass merging. Check
+    * if all resolve attachments support TLB resolve based on their format.
     */
-   if (prev_subpass->resolve_attachments || subpass->resolve_attachments ||
-       prev_subpass->resolve_depth || prev_subpass->resolve_stencil ||
-       subpass->resolve_depth || subpass->resolve_stencil) {
-      return false;
+   const struct v3dv_render_pass *pass = state->pass;
+
+   /* Check previous subpass color resolve attachments */
+   if (prev_subpass->resolve_attachments) {
+      for (uint32_t i = 0; i < prev_subpass->color_count; i++) {
+         uint32_t att_idx = prev_subpass->color_attachments[i].attachment;
+         if (att_idx == VK_ATTACHMENT_UNUSED)
+            continue;
+         if (prev_subpass->resolve_attachments[i].attachment != VK_ATTACHMENT_UNUSED &&
+             !pass->attachments[att_idx].try_tlb_resolve) {
+            return false;
+         }
+      }
+   }
+
+   /* Check current subpass color resolve attachments */
+   if (subpass->resolve_attachments) {
+      for (uint32_t i = 0; i < subpass->color_count; i++) {
+         uint32_t att_idx = subpass->color_attachments[i].attachment;
+         if (att_idx == VK_ATTACHMENT_UNUSED)
+            continue;
+         if (subpass->resolve_attachments[i].attachment != VK_ATTACHMENT_UNUSED &&
+             !pass->attachments[att_idx].try_tlb_resolve) {
+            return false;
+         }
+      }
+   }
+
+   /* Check previous subpass D/S resolve attachment */
+   if ((prev_subpass->resolve_depth || prev_subpass->resolve_stencil) &&
+       prev_subpass->ds_attachment.attachment != VK_ATTACHMENT_UNUSED) {
+      uint32_t att_idx = prev_subpass->ds_attachment.attachment;
+      if (!pass->attachments[att_idx].try_tlb_resolve)
+         return false;
+   }
+
+   /* Check current subpass D/S resolve attachment */
+   if ((subpass->resolve_depth || subpass->resolve_stencil) &&
+       subpass->ds_attachment.attachment != VK_ATTACHMENT_UNUSED) {
+      uint32_t att_idx = subpass->ds_attachment.attachment;
+      if (!pass->attachments[att_idx].try_tlb_resolve)
+         return false;
    }
 
    return true;
@@ -1816,12 +1865,121 @@ cmd_buffer_subpass_create_job(struct v3dv_cmd_buffer *cmd_buffer,
    return job;
 }
 
+/* For independentResolveNone: when one D/S aspect is resolved but the other
+ * is not, we need to honor the loadOp of the non-resolved aspect on the
+ * resolve attachment. Since the resolve attachment is not part of the
+ * framebuffer, we can't use the normal TLB clear mechanism. Instead, we
+ * emit a separate TLB clear job for the non-resolved aspect if needed.
+ */
+static void
+cmd_buffer_emit_non_resolved_ds_aspect_clear(struct v3dv_cmd_buffer *cmd_buffer,
+                                             uint32_t subpass_idx)
+{
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+   const struct v3dv_render_pass *pass = state->pass;
+   const struct v3dv_subpass *subpass = &pass->subpasses[subpass_idx];
+
+   /* Only applies when exactly one of depth/stencil is resolved */
+   if (subpass->ds_resolve_attachment.attachment == VK_ATTACHMENT_UNUSED)
+      return;
+
+   if (subpass->resolve_depth == subpass->resolve_stencil)
+      return;  /* Both resolved or neither - no special handling needed */
+
+   const uint32_t resolve_idx = subpass->ds_resolve_attachment.attachment;
+   const struct v3dv_render_pass_attachment *resolve_att =
+      &pass->attachments[resolve_idx];
+
+   /* Check if the non-resolved aspect needs a clear */
+   VkAttachmentLoadOp load_op;
+   VkImageAspectFlags aspect;
+   if (subpass->resolve_depth) {
+      /* Depth is resolved, check stencil loadOp */
+      load_op = resolve_att->desc.stencilLoadOp;
+      aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
+   } else {
+      /* Stencil is resolved, check depth loadOp */
+      load_op = resolve_att->desc.loadOp;
+      aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+   }
+
+   if (load_op != VK_ATTACHMENT_LOAD_OP_CLEAR)
+      return;
+
+   /* Get the resolve attachment image */
+   const struct v3dv_image_view *iview = state->attachments[resolve_idx].image_view;
+   if (!iview)
+      return;
+
+   struct v3dv_image *image = (struct v3dv_image *)iview->vk.image;
+   const VkClearValue *clear_value = &state->attachments[resolve_idx].vk_clear_value;
+
+   /* Set up the clear job */
+   const VkOffset3D origin = { 0, 0, 0 };
+   VkFormat fb_format;
+   if (!v3dv_meta_can_use_tlb(&cmd_buffer->device->devinfo,
+                              image, 0, 0, &origin, NULL, &fb_format))
+      return;
+
+   uint32_t internal_type, internal_bpp;
+   v3d_X((&cmd_buffer->device->devinfo), get_internal_type_bpp_for_image_aspects)
+      (fb_format, aspect, &internal_type, &internal_bpp);
+
+   union v3dv_clear_value hw_clear_value = { 0 };
+   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT)
+      hw_clear_value.z = clear_value->depthStencil.depth;
+   else
+      hw_clear_value.s = clear_value->depthStencil.stencil;
+
+   /* Use render area dimensions for the clear job */
+   uint32_t width = state->render_area.offset.x + state->render_area.extent.width;
+   uint32_t height = state->render_area.offset.y + state->render_area.extent.height;
+
+   /* Handle multiview */
+   uint32_t layers = 1;
+   if (subpass->view_mask != 0)
+      layers = util_last_bit(subpass->view_mask);
+   else if (iview->vk.layer_count > 0)
+      layers = iview->vk.layer_count;
+
+   struct v3dv_job *job =
+      v3dv_cmd_buffer_start_job(cmd_buffer, -1, V3DV_JOB_TYPE_GPU_CL);
+   if (!job)
+      return;
+
+   v3dv_job_start_frame(job, width, height, layers,
+                        false, 1, internal_bpp,
+                        4 * v3d_internal_bpp_words(internal_bpp),
+                        image->vk.samples > VK_SAMPLE_COUNT_1_BIT);
+
+   struct v3dv_meta_framebuffer framebuffer;
+   v3d_X((&job->device->devinfo), meta_framebuffer_init)(&framebuffer, fb_format,
+                                                          internal_type,
+                                                          &job->frame_tiling);
+
+   v3d_X((&job->device->devinfo), job_emit_binning_flush)(job);
+
+   v3d_X((&job->device->devinfo), meta_emit_clear_image_rcl)
+      (job, image, &framebuffer, &hw_clear_value,
+       aspect, iview->vk.base_array_layer,
+       iview->vk.base_array_layer + layers, iview->vk.base_mip_level);
+
+   v3dv_cmd_buffer_finish_job(cmd_buffer);
+}
+
 struct v3dv_job *
 v3dv_cmd_buffer_subpass_start(struct v3dv_cmd_buffer *cmd_buffer,
                               uint32_t subpass_idx)
 {
    assert(cmd_buffer->state.pass);
    assert(subpass_idx < cmd_buffer->state.pass->subpass_count);
+
+   /* For independentResolveNone, emit a clear for non-resolved D/S aspects
+    * before starting the main subpass job. This must happen before the
+    * subpass job since the resolve attachment is not in the framebuffer.
+    */
+   if (!cmd_buffer->state.resuming)
+      cmd_buffer_emit_non_resolved_ds_aspect_clear(cmd_buffer, subpass_idx);
 
    struct v3dv_job *job =
       cmd_buffer_subpass_create_job(cmd_buffer, subpass_idx,
@@ -2328,7 +2486,7 @@ emit_scissor(struct v3dv_cmd_buffer *cmd_buffer)
 
    struct v3dv_dynamic_state *dynamic = &cmd_buffer->state.dynamic;
 
-   /* FIXME: right now we only support one viewport. viewporst[0] would work
+   /* FIXME: right now we only support one viewport. viewports[0] would work
     * now, but would need to change if we allow multiple viewports.
     */
    float *vptranslate = dynamic->viewport.translate[0];
@@ -3026,7 +3184,13 @@ v3dv_cmd_buffer_emit_pre_draw(struct v3dv_cmd_buffer *cmd_buffer,
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_DS_STENCIL_TEST_ENABLE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_DS_DEPTH_BOUNDS_TEST_ENABLE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_BIAS_ENABLE) ||
-       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE)) {
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_POLYGON_MODE) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_MODE) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLIP_ENABLE) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE)) {
       v3d_X((&device->devinfo), cmd_buffer_emit_configuration_bits)(cmd_buffer);
    }
 
@@ -3070,6 +3234,9 @@ v3dv_cmd_buffer_emit_pre_draw(struct v3dv_cmd_buffer *cmd_buffer,
    if (*dirty & V3DV_CMD_DIRTY_OCCLUSION_QUERY)
       v3d_X((&device->devinfo), cmd_buffer_emit_occlusion_query)(cmd_buffer);
 
+   if (*dirty & V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK)
+      v3d_X((&device->devinfo), cmd_buffer_emit_transform_feedback)(cmd_buffer);
+
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_WIDTH))
       v3d_X((&device->devinfo), cmd_buffer_emit_line_width)(cmd_buffer);
 
@@ -3088,11 +3255,13 @@ v3dv_cmd_buffer_emit_pre_draw(struct v3dv_cmd_buffer *cmd_buffer,
       v3d_X((&device->devinfo), cmd_buffer_emit_default_point_size)(cmd_buffer);
    }
 
-   if (*dirty & V3DV_CMD_DIRTY_PIPELINE)
+   if (*dirty & V3DV_CMD_DIRTY_PIPELINE ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_MS_SAMPLE_MASK))
       v3d_X((&device->devinfo), cmd_buffer_emit_sample_state)(cmd_buffer);
 
    if (*dirty & V3DV_CMD_DIRTY_PIPELINE ||
-       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES)) {
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_WRITE_MASKS)) {
       v3d_X((&device->devinfo), cmd_buffer_emit_color_write_mask)(cmd_buffer);
    }
 
@@ -3943,6 +4112,98 @@ v3dv_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
    }
 }
 
+static bool
+v3dv_cmd_buffer_init_push_descriptor_set(struct v3dv_cmd_buffer *cmd_buffer,
+                                          struct v3dv_descriptor_set_layout *layout,
+                                          VkPipelineBindPoint bind_point)
+{
+   struct v3dv_descriptor_state *descriptor_state =
+      bind_point == VK_PIPELINE_BIND_POINT_COMPUTE ?
+      &cmd_buffer->state.compute.descriptor_state :
+      &cmd_buffer->state.gfx.descriptor_state;
+
+   if (descriptor_state->push_set.capacity < layout->descriptor_count) {
+      size_t new_size = MAX2(layout->descriptor_count, 64);
+      new_size = MAX2(new_size, 2 * descriptor_state->push_set.capacity);
+      new_size = MIN2(new_size, 96 * MAX_PUSH_DESCRIPTORS);
+
+      /* Allocate the descriptor set struct plus space for descriptors */
+      size_t set_size = sizeof(struct v3dv_descriptor_set) +
+                        new_size * sizeof(struct v3dv_descriptor);
+      struct v3dv_descriptor_set *new_set =
+         vk_realloc(&cmd_buffer->device->vk.alloc,
+                    descriptor_state->push_set.set,
+                    set_size, 8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!new_set) {
+         descriptor_state->push_set.capacity = 0;
+         v3dv_flag_oom(cmd_buffer, NULL);
+         return false;
+      }
+
+      descriptor_state->push_set.set = new_set;
+      descriptor_state->push_set.capacity = new_size;
+   }
+
+   descriptor_state->push_set.set->layout = layout;
+   return true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdPushDescriptorSet2KHR(VkCommandBuffer commandBuffer,
+                               const VkPushDescriptorSetInfoKHR *pPushDescriptorSetInfo)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   V3DV_FROM_HANDLE(v3dv_pipeline_layout, layout, pPushDescriptorSetInfo->layout);
+
+   struct v3dv_descriptor_set_layout *set_layout =
+      layout->set[pPushDescriptorSetInfo->set].layout;
+
+   assert(set_layout->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT);
+
+   VkPipelineBindPoint bind_point;
+   if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+      bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+   } else {
+      bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
+   }
+
+   struct v3dv_descriptor_state *descriptor_state =
+      bind_point == VK_PIPELINE_BIND_POINT_COMPUTE ?
+      &cmd_buffer->state.compute.descriptor_state :
+      &cmd_buffer->state.gfx.descriptor_state;
+
+   if (!v3dv_cmd_buffer_init_push_descriptor_set(cmd_buffer,
+                                                  set_layout, bind_point))
+      return;
+
+   struct v3dv_descriptor_set *push_set = descriptor_state->push_set.set;
+
+   /* Update the push descriptors */
+   VkDevice vk_device = v3dv_device_to_handle(cmd_buffer->device);
+   VkDescriptorSet vk_push_set = v3dv_descriptor_set_to_handle(push_set);
+
+   for (uint32_t i = 0; i < pPushDescriptorSetInfo->descriptorWriteCount; i++) {
+      VkWriteDescriptorSet write = pPushDescriptorSetInfo->pDescriptorWrites[i];
+      write.dstSet = vk_push_set;
+      v3dv_UpdateDescriptorSets(vk_device, 1, &write, 0, NULL);
+   }
+
+   /* Bind the push descriptor set */
+   uint32_t set_index = pPushDescriptorSetInfo->set;
+   descriptor_state->valid |= (1u << set_index);
+   descriptor_state->descriptor_sets[set_index] = push_set;
+
+   if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+      cmd_buffer->state.dirty |= V3DV_CMD_DIRTY_DESCRIPTOR_SETS;
+      cmd_buffer->state.dirty_descriptor_stages |=
+         set_layout->shader_stages & VK_SHADER_STAGE_ALL_GRAPHICS;
+   } else {
+      cmd_buffer->state.dirty |= V3DV_CMD_DIRTY_COMPUTE_DESCRIPTOR_SETS;
+      cmd_buffer->state.dirty_descriptor_stages |= VK_SHADER_STAGE_COMPUTE_BIT;
+   }
+}
+
 VKAPI_ATTR void VKAPI_CALL
 v3dv_CmdPushConstants(VkCommandBuffer commandBuffer,
                       VkPipelineLayout layout,
@@ -4613,4 +4874,447 @@ v3dv_CmdEndRenderingKHR(VkCommandBuffer commandBuffer)
    state->subpass_idx = -1;
    state->suspending = false;
    state->resuming = false;
+}
+
+/* VK_EXT_transform_feedback */
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdBindTransformFeedbackBuffersEXT(VkCommandBuffer commandBuffer,
+                                        uint32_t firstBinding,
+                                        uint32_t bindingCount,
+                                        const VkBuffer *pBuffers,
+                                        const VkDeviceSize *pOffsets,
+                                        const VkDeviceSize *pSizes)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+
+   assert(firstBinding + bindingCount <= MAX_TF_BUFFERS);
+
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      uint32_t idx = firstBinding + i;
+      struct v3dv_buffer *buffer = v3dv_buffer_from_handle(pBuffers[i]);
+
+      state->tf.buffers[idx].buffer = buffer;
+      state->tf.buffers[idx].offset = pOffsets[i];
+      state->tf.buffers[idx].size = pSizes ? pSizes[i] : VK_WHOLE_SIZE;
+
+      if (state->tf.buffers[idx].size == VK_WHOLE_SIZE)
+         state->tf.buffers[idx].size = buffer->size - pOffsets[i];
+   }
+
+   state->tf.buffer_count = MAX2(state->tf.buffer_count,
+                                  firstBinding + bindingCount);
+
+   state->dirty |= V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
+                                  uint32_t firstCounterBuffer,
+                                  uint32_t counterBufferCount,
+                                  const VkBuffer *pCounterBuffers,
+                                  const VkDeviceSize *pCounterBufferOffsets)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+
+   assert(!state->tf.active);
+
+   /* Store counter buffers for resume functionality */
+   if (pCounterBuffers) {
+      for (uint32_t i = 0; i < counterBufferCount; i++) {
+         uint32_t idx = firstCounterBuffer + i;
+         if (pCounterBuffers[i] != VK_NULL_HANDLE) {
+            state->tf.counter_buffers[idx].buffer =
+               v3dv_buffer_from_handle(pCounterBuffers[i]);
+            state->tf.counter_buffers[idx].offset =
+               pCounterBufferOffsets ? pCounterBufferOffsets[i] : 0;
+         } else {
+            state->tf.counter_buffers[idx].buffer = NULL;
+            state->tf.counter_buffers[idx].offset = 0;
+         }
+      }
+   }
+
+   state->tf.active = true;
+   state->tf.paused = false;
+
+   state->dirty |= V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdEndTransformFeedbackEXT(VkCommandBuffer commandBuffer,
+                                uint32_t firstCounterBuffer,
+                                uint32_t counterBufferCount,
+                                const VkBuffer *pCounterBuffers,
+                                const VkDeviceSize *pCounterBufferOffsets)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+
+   assert(state->tf.active);
+
+   /* If counter buffers are provided, we should save the current byte count
+    * for resume functionality. This requires flushing the TF data.
+    */
+   if (pCounterBuffers) {
+      state->tf.paused = true;
+      for (uint32_t i = 0; i < counterBufferCount; i++) {
+         uint32_t idx = firstCounterBuffer + i;
+         if (pCounterBuffers[i] != VK_NULL_HANDLE) {
+            state->tf.counter_buffers[idx].buffer =
+               v3dv_buffer_from_handle(pCounterBuffers[i]);
+            state->tf.counter_buffers[idx].offset =
+               pCounterBufferOffsets ? pCounterBufferOffsets[i] : 0;
+         }
+      }
+   }
+
+   state->tf.active = false;
+
+   state->dirty |= V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK;
+}
+
+/* Compute shader for vkCmdDrawIndirectByteCountEXT.
+ * Reads byte count from counter buffer and writes VkDrawIndirectCommand.
+ *
+ * Push constants layout:
+ *   0: counterOffset (uint32_t)
+ *   4: vertexStride (uint32_t)
+ *   8: instanceCount (uint32_t)
+ *  12: firstInstance (uint32_t)
+ */
+static nir_shader *
+get_draw_indirect_byte_count_cs(const nir_shader_compiler_options *options)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, options,
+                                                  "draw indirect byte count cs");
+
+   /* Input buffer (counter buffer) - binding 0 */
+   nir_def *in_buf =
+      nir_vulkan_resource_index(&b, 2, 32, nir_imm_int(&b, 0),
+                                .desc_set = 0,
+                                .binding = 0,
+                                .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+   /* Output buffer (indirect draw command) - binding 1 */
+   nir_def *out_buf =
+      nir_vulkan_resource_index(&b, 2, 32, nir_imm_int(&b, 0),
+                                .desc_set = 0,
+                                .binding = 1,
+                                .desc_type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+   /* Load push constants */
+   nir_def *counter_offset =
+      nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 0, .range = 16);
+   nir_def *vertex_stride =
+      nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 4, .range = 16);
+   nir_def *instance_count =
+      nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 8, .range = 16);
+   nir_def *first_instance =
+      nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 12, .range = 16);
+
+   /* Read byte count from counter buffer at offset 0 */
+   nir_def *byte_count =
+      nir_load_ssbo(&b, 1, 32, in_buf, nir_imm_int(&b, 0), .access = 0, .align_mul = 4);
+
+   /* Calculate vertex count = (byteCount - counterOffset) / vertexStride */
+   nir_def *adjusted = nir_isub(&b, byte_count, counter_offset);
+   nir_def *vertex_count = nir_udiv(&b, adjusted, vertex_stride);
+
+   /* Write VkDrawIndirectCommand to output buffer:
+    * struct VkDrawIndirectCommand {
+    *     uint32_t vertexCount;
+    *     uint32_t instanceCount;
+    *     uint32_t firstVertex;
+    *     uint32_t firstInstance;
+    * };
+    */
+   nir_store_ssbo(&b, vertex_count, out_buf, nir_imm_int(&b, 0),
+                  .access = 0, .write_mask = 0x1, .align_mul = 4);
+   nir_store_ssbo(&b, instance_count, out_buf, nir_imm_int(&b, 4),
+                  .access = 0, .write_mask = 0x1, .align_mul = 4);
+   nir_store_ssbo(&b, nir_imm_int(&b, 0), out_buf, nir_imm_int(&b, 8),
+                  .access = 0, .write_mask = 0x1, .align_mul = 4);
+   nir_store_ssbo(&b, first_instance, out_buf, nir_imm_int(&b, 12),
+                  .access = 0, .write_mask = 0x1, .align_mul = 4);
+
+   return b.shader;
+}
+
+static bool
+create_tf_draw_pipeline(struct v3dv_device *device)
+{
+   VkResult result;
+
+   if (device->tf_draw.pipeline)
+      return true;
+
+   const nir_shader_compiler_options *options =
+      v3dv_pipeline_get_nir_options(&device->devinfo);
+
+   /* Descriptor set layout with 2 storage buffers:
+    * - binding 0: counter buffer (input)
+    * - binding 1: indirect draw command buffer (output)
+    */
+   if (!device->tf_draw.descriptor_set_layout) {
+      VkDescriptorSetLayoutBinding bindings[2] = {
+         {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+         },
+         {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+         },
+      };
+
+      VkDescriptorSetLayoutCreateInfo descriptor_set_layout_info = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+         .bindingCount = 2,
+         .pBindings = bindings,
+      };
+
+      result = v3dv_CreateDescriptorSetLayout(
+         v3dv_device_to_handle(device),
+         &descriptor_set_layout_info,
+         &device->vk.alloc,
+         &device->tf_draw.descriptor_set_layout);
+      if (result != VK_SUCCESS)
+         return false;
+   }
+
+   /* Pipeline layout with push constants */
+   if (!device->tf_draw.pipeline_layout) {
+      VkPipelineLayoutCreateInfo pipeline_layout_info = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+         .setLayoutCount = 1,
+         .pSetLayouts = &device->tf_draw.descriptor_set_layout,
+         .pushConstantRangeCount = 1,
+         .pPushConstantRanges =
+            &(VkPushConstantRange) { VK_SHADER_STAGE_COMPUTE_BIT, 0, 16 },
+      };
+
+      result = v3dv_CreatePipelineLayout(
+         v3dv_device_to_handle(device),
+         &pipeline_layout_info,
+         &device->vk.alloc,
+         &device->tf_draw.pipeline_layout);
+      if (result != VK_SUCCESS)
+         return false;
+   }
+
+   /* Create compute pipeline */
+   nir_shader *cs_nir = get_draw_indirect_byte_count_cs(options);
+   result = v3dv_create_compute_pipeline_from_nir(
+      device, cs_nir, device->tf_draw.pipeline_layout, &device->tf_draw.pipeline);
+   ralloc_free(cs_nir);
+   if (result != VK_SUCCESS)
+      return false;
+
+   return true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+v3dv_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
+                                 uint32_t instanceCount,
+                                 uint32_t firstInstance,
+                                 VkBuffer counterBuffer,
+                                 VkDeviceSize counterBufferOffset,
+                                 uint32_t counterOffset,
+                                 uint32_t vertexStride)
+{
+   V3DV_FROM_HANDLE(v3dv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct v3dv_device *device = cmd_buffer->device;
+   VkDevice vk_device = v3dv_device_to_handle(device);
+
+   /* Ensure the TF draw pipeline is created */
+   if (!create_tf_draw_pipeline(device)) {
+      mesa_loge("v3dv: Failed to create TF draw pipeline");
+      return;
+   }
+
+   /* Create a buffer and memory for the indirect draw command (16 bytes) */
+   VkBuffer indirect_buffer;
+   VkBufferCreateInfo buf_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = 16,
+      .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+               VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+   };
+   if (v3dv_CreateBuffer(vk_device, &buf_info, &device->vk.alloc,
+                          &indirect_buffer) != VK_SUCCESS) {
+      mesa_loge("v3dv: Failed to create indirect buffer");
+      return;
+   }
+
+   VkMemoryRequirements2 mem_reqs = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+   };
+   VkBufferMemoryRequirementsInfo2 req_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
+      .buffer = indirect_buffer,
+   };
+   v3dv_GetBufferMemoryRequirements2(vk_device, &req_info, &mem_reqs);
+
+   VkDeviceMemory indirect_mem;
+   VkMemoryAllocateInfo mem_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = mem_reqs.memoryRequirements.size,
+      .memoryTypeIndex = 0,
+   };
+   if (v3dv_AllocateMemory(vk_device, &mem_info, &device->vk.alloc,
+                            &indirect_mem) != VK_SUCCESS) {
+      v3dv_DestroyBuffer(vk_device, indirect_buffer, &device->vk.alloc);
+      return;
+   }
+
+   VkBindBufferMemoryInfo bind_info = {
+      .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
+      .buffer = indirect_buffer,
+      .memory = indirect_mem,
+      .memoryOffset = 0,
+   };
+   v3dv_BindBufferMemory2(vk_device, 1, &bind_info);
+
+   /* Track resources for cleanup when command buffer is freed */
+   v3dv_cmd_buffer_add_private_obj(
+      cmd_buffer, (uintptr_t)v3dv_device_memory_from_handle(indirect_mem),
+      (v3dv_cmd_buffer_private_obj_destroy_cb)v3dv_FreeMemory);
+   v3dv_cmd_buffer_add_private_obj(
+      cmd_buffer, (uintptr_t)v3dv_buffer_from_handle(indirect_buffer),
+      (v3dv_cmd_buffer_private_obj_destroy_cb)v3dv_DestroyBuffer);
+
+   /* Create temporary descriptor pool and set */
+   VkDescriptorPool desc_pool;
+   VkDescriptorPoolSize pool_size = {
+      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 2,
+   };
+   VkDescriptorPoolCreateInfo pool_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 1,
+      .poolSizeCount = 1,
+      .pPoolSizes = &pool_size,
+   };
+   if (v3dv_CreateDescriptorPool(vk_device, &pool_info, &device->vk.alloc,
+                                  &desc_pool) != VK_SUCCESS) {
+      return;
+   }
+
+   VkDescriptorSet desc_set;
+   VkDescriptorSetAllocateInfo alloc_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = desc_pool,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &device->tf_draw.descriptor_set_layout,
+   };
+   if (v3dv_AllocateDescriptorSets(vk_device, &alloc_info, &desc_set) != VK_SUCCESS) {
+      v3dv_DestroyDescriptorPool(vk_device, desc_pool, &device->vk.alloc);
+      return;
+   }
+
+   /* Update descriptors */
+   VkDescriptorBufferInfo buffer_infos[2] = {
+      {
+         .buffer = counterBuffer,
+         .offset = counterBufferOffset,
+         .range = 4,
+      },
+      {
+         .buffer = indirect_buffer,
+         .offset = 0,
+         .range = 16,
+      },
+   };
+   VkWriteDescriptorSet writes[2] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = desc_set,
+         .dstBinding = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &buffer_infos[0],
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = desc_set,
+         .dstBinding = 1,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &buffer_infos[1],
+      },
+   };
+   v3dv_UpdateDescriptorSets(vk_device, 2, writes, 0, NULL);
+
+   /* Save current compute state */
+   struct v3dv_cmd_pipeline_state saved_pipeline_state = cmd_buffer->state.compute;
+
+   /* Bind the TF draw pipeline */
+   v3dv_CmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                        device->tf_draw.pipeline);
+
+   /* Bind descriptor set */
+   v3dv_CmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              device->tf_draw.pipeline_layout, 0, 1,
+                              &desc_set, 0, NULL);
+
+   /* Push constants */
+   uint32_t push_constants[4] = {
+      counterOffset,
+      vertexStride,
+      instanceCount,
+      firstInstance,
+   };
+   v3dv_CmdPushConstants(commandBuffer, device->tf_draw.pipeline_layout,
+                         VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push_constants);
+
+   /* Dispatch compute shader (single workgroup) */
+   v3dv_CmdDispatchBase(commandBuffer, 0, 0, 0, 1, 1, 1);
+
+   /* Memory barrier to ensure compute writes are visible to indirect draw */
+   VkMemoryBarrier2 barrier = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+      .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+   };
+   VkDependencyInfo dep_info = {
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1,
+      .pMemoryBarriers = &barrier,
+   };
+   v3dv_CmdPipelineBarrier2(commandBuffer, &dep_info);
+
+   /* Restore compute state */
+   cmd_buffer->state.compute = saved_pipeline_state;
+   cmd_buffer->state.dirty |= V3DV_CMD_DIRTY_COMPUTE_PIPELINE |
+                              V3DV_CMD_DIRTY_COMPUTE_DESCRIPTOR_SETS;
+
+   /* Issue the indirect draw */
+   struct v3dv_buffer *buf = v3dv_buffer_from_handle(indirect_buffer);
+   struct v3dv_render_pass *pass = cmd_buffer->state.pass;
+   if (likely(!pass->multiview_enabled)) {
+      cmd_buffer_set_view_index(cmd_buffer, 0);
+      v3dv_cmd_buffer_emit_pre_draw(cmd_buffer, false, true, 0);
+      v3d_X((&device->devinfo), cmd_buffer_emit_draw_indirect)
+         (cmd_buffer, buf, 0, 1, 0);
+   } else {
+      uint32_t view_mask = pass->subpasses[cmd_buffer->state.subpass_idx].view_mask;
+      while (view_mask) {
+         cmd_buffer_set_view_index(cmd_buffer, u_bit_scan(&view_mask));
+         v3dv_cmd_buffer_emit_pre_draw(cmd_buffer, false, true, 0);
+         v3d_X((&device->devinfo), cmd_buffer_emit_draw_indirect)
+            (cmd_buffer, buf, 0, 1, 0);
+      }
+   }
+
+   /* Clean up descriptor pool */
+   v3dv_DestroyDescriptorPool(vk_device, desc_pool, &device->vk.alloc);
 }

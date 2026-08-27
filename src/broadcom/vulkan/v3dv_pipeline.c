@@ -36,6 +36,7 @@
 
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_lower_blend.h"
+#include "compiler/nir/nir_xfb_info.h"
 #include "nir/nir_serialize.h"
 
 #include "util/format/u_format.h"
@@ -256,6 +257,404 @@ lookup_ycbcr_conversion(const void *_pipeline_layout, uint32_t set,
    } else {
       return NULL;
    }
+}
+
+/**
+ * Lower indirect texture/sampler array access to if-else trees.
+ *
+ * V3D requires constant texture/sampler indices at compile time because
+ * they are packed into TMU configuration uniforms. This pass converts
+ * dynamic array indexing like texture(tex_array[idx], ...) into a series
+ * of constant-index accesses protected by conditionals.
+ *
+ * For an array of size N, this generates:
+ *   if (idx == 0)
+ *     result = texture(tex_array[0], ...);
+ *   else if (idx == 1)
+ *     result = texture(tex_array[1], ...);
+ *   ...
+ *   else
+ *     result = texture(tex_array[N-1], ...);
+ */
+
+/* Check if a deref chain contains any indirect (non-constant) array access */
+static bool
+deref_has_indirect(nir_deref_instr *deref)
+{
+   while (deref->deref_type != nir_deref_type_var) {
+      if (deref->deref_type == nir_deref_type_array &&
+          !nir_src_is_const(deref->arr.index))
+         return true;
+      deref = nir_deref_instr_parent(deref);
+   }
+   return false;
+}
+
+/* Get the array length and the indirect index from the first indirect access */
+static bool
+get_first_indirect_info(nir_deref_instr *deref,
+                        nir_def **out_index,
+                        uint32_t *out_array_len)
+{
+   while (deref->deref_type != nir_deref_type_var) {
+      if (deref->deref_type == nir_deref_type_array &&
+          !nir_src_is_const(deref->arr.index)) {
+         nir_deref_instr *parent = nir_deref_instr_parent(deref);
+         *out_array_len = glsl_get_length(parent->type);
+         *out_index = deref->arr.index.ssa;
+         return true;
+      }
+      deref = nir_deref_instr_parent(deref);
+   }
+   return false;
+}
+
+/* Build a deref chain replacing the first indirect access with a constant */
+static nir_deref_instr *
+build_deref_with_const_index(nir_builder *b, nir_deref_instr *deref,
+                             uint32_t const_idx)
+{
+   /* Build a stack of derefs */
+   nir_deref_instr *deref_stack[16];
+   int stack_depth = 0;
+
+   nir_deref_instr *d = deref;
+   while (d->deref_type != nir_deref_type_var) {
+      assert(stack_depth < 16);
+      deref_stack[stack_depth++] = d;
+      d = nir_deref_instr_parent(d);
+   }
+
+   /* Rebuild from var, replacing the first indirect with const_idx */
+   nir_deref_instr *result = nir_build_deref_var(b, d->var);
+   bool replaced = false;
+
+   for (int i = stack_depth - 1; i >= 0; i--) {
+      nir_deref_instr *src = deref_stack[i];
+      if (src->deref_type == nir_deref_type_array) {
+         if (!replaced && !nir_src_is_const(src->arr.index)) {
+            result = nir_build_deref_array_imm(b, result, const_idx);
+            replaced = true;
+         } else if (nir_src_is_const(src->arr.index)) {
+            result = nir_build_deref_array_imm(b, result,
+                                               nir_src_as_uint(src->arr.index));
+         } else {
+            result = nir_build_deref_array(b, result, src->arr.index.ssa);
+         }
+      } else if (src->deref_type == nir_deref_type_struct) {
+         result = nir_build_deref_struct(b, result, src->strct.index);
+      }
+   }
+
+   return result;
+}
+
+/* Clone a tex instruction with new deref sources */
+static nir_tex_instr *
+clone_tex_with_derefs(nir_builder *b, nir_tex_instr *tex,
+                      nir_deref_instr *new_tex_deref,
+                      nir_deref_instr *new_samp_deref)
+{
+   nir_tex_instr *new_tex = nir_tex_instr_create(b->shader, tex->num_srcs);
+
+   new_tex->op = tex->op;
+   new_tex->sampler_dim = tex->sampler_dim;
+   new_tex->dest_type = tex->dest_type;
+   new_tex->coord_components = tex->coord_components;
+   new_tex->is_array = tex->is_array;
+   new_tex->is_shadow = tex->is_shadow;
+   new_tex->is_new_style_shadow = tex->is_new_style_shadow;
+   new_tex->is_sparse = tex->is_sparse;
+   new_tex->component = tex->component;
+   new_tex->texture_index = tex->texture_index;
+   new_tex->sampler_index = tex->sampler_index;
+   new_tex->backend_flags = tex->backend_flags;
+
+   for (unsigned i = 0; i < tex->num_srcs; i++) {
+      new_tex->src[i].src_type = tex->src[i].src_type;
+
+      switch (tex->src[i].src_type) {
+      case nir_tex_src_texture_deref:
+         new_tex->src[i].src = nir_src_for_ssa(&new_tex_deref->def);
+         break;
+      case nir_tex_src_sampler_deref:
+         new_tex->src[i].src = nir_src_for_ssa(&new_samp_deref->def);
+         break;
+      default:
+         new_tex->src[i].src = nir_src_for_ssa(tex->src[i].src.ssa);
+         break;
+      }
+   }
+
+   nir_def_init(&new_tex->instr, &new_tex->def,
+                tex->def.num_components, tex->def.bit_size);
+   nir_builder_instr_insert(b, &new_tex->instr);
+
+   return new_tex;
+}
+
+/* Emit tex instructions for a range [start, end) of array indices using binary search */
+static nir_def *
+emit_indirect_tex_binary_search(nir_builder *b, nir_tex_instr *tex,
+                                nir_deref_instr *tex_deref,
+                                nir_deref_instr *samp_deref,
+                                nir_def *index,
+                                int start, int end)
+{
+   assert(start < end);
+
+   if (start == end - 1) {
+      /* Base case: emit tex with constant index */
+      nir_deref_instr *new_tex_deref =
+         tex_deref ? build_deref_with_const_index(b, tex_deref, start) : NULL;
+      nir_deref_instr *new_samp_deref =
+         samp_deref ? build_deref_with_const_index(b, samp_deref, start) : NULL;
+
+      /* Use the original derefs if we didn't need to replace anything */
+      if (!new_tex_deref && tex_deref)
+         new_tex_deref = tex_deref;
+      if (!new_samp_deref && samp_deref)
+         new_samp_deref = samp_deref;
+
+      nir_tex_instr *new_tex = clone_tex_with_derefs(b, tex,
+                                                     new_tex_deref,
+                                                     new_samp_deref);
+      return &new_tex->def;
+   } else {
+      /* Binary search: split into two halves */
+      int mid = start + (end - start) / 2;
+
+      nir_push_if(b, nir_ilt_imm(b, index, mid));
+      nir_def *then_result = emit_indirect_tex_binary_search(b, tex,
+                                                             tex_deref, samp_deref,
+                                                             index, start, mid);
+      nir_push_else(b, NULL);
+      nir_def *else_result = emit_indirect_tex_binary_search(b, tex,
+                                                             tex_deref, samp_deref,
+                                                             index, mid, end);
+      nir_pop_if(b, NULL);
+
+      return nir_if_phi(b, then_result, else_result);
+   }
+}
+
+static bool
+lower_tex_deref_to_if_else(nir_builder *b, nir_tex_instr *tex)
+{
+   /* Find texture and sampler derefs */
+   int tex_src_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   int samp_src_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+
+   nir_deref_instr *tex_deref = tex_src_idx >= 0 ?
+      nir_src_as_deref(tex->src[tex_src_idx].src) : NULL;
+   nir_deref_instr *samp_deref = samp_src_idx >= 0 ?
+      nir_src_as_deref(tex->src[samp_src_idx].src) : NULL;
+
+   /* Check if either has indirect access */
+   bool tex_indirect = tex_deref && deref_has_indirect(tex_deref);
+   bool samp_indirect = samp_deref && deref_has_indirect(samp_deref);
+
+   if (!tex_indirect && !samp_indirect)
+      return false;
+
+   /* Get the indirect index and array length */
+   nir_def *index = NULL;
+   uint32_t array_len = 0;
+
+   /* Prefer texture deref if both have indirects */
+   nir_deref_instr *indirect_deref = tex_indirect ? tex_deref : samp_deref;
+   if (!get_first_indirect_info(indirect_deref, &index, &array_len))
+      return false;
+
+   /* Limit array size to prevent code explosion */
+   if (array_len > 64)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+
+   /* Emit the if-else tree using binary search */
+   nir_def *result = emit_indirect_tex_binary_search(b, tex,
+                                                     tex_deref, samp_deref,
+                                                     index, 0, array_len);
+
+   /* Replace original instruction */
+   nir_def_replace(&tex->def, result);
+
+   return true;
+}
+
+/* Clone an image intrinsic with a new deref source */
+static nir_intrinsic_instr *
+clone_image_intrin_with_deref(nir_builder *b, nir_intrinsic_instr *intrin,
+                              nir_deref_instr *new_deref)
+{
+   nir_intrinsic_instr *new_intrin =
+      nir_intrinsic_instr_create(b->shader, intrin->intrinsic);
+
+   /* Copy all sources, replacing the image deref (always src 0) */
+   unsigned num_srcs = nir_intrinsic_infos[intrin->intrinsic].num_srcs;
+   for (unsigned i = 0; i < num_srcs; i++) {
+      if (i == 0) {
+         new_intrin->src[i] = nir_src_for_ssa(&new_deref->def);
+      } else {
+         new_intrin->src[i] = nir_src_for_ssa(intrin->src[i].ssa);
+      }
+   }
+
+   /* Copy intrinsic indices */
+   memcpy(new_intrin->const_index, intrin->const_index,
+          sizeof(intrin->const_index));
+
+   /* Copy dest if this intrinsic has one */
+   if (nir_intrinsic_infos[intrin->intrinsic].has_dest) {
+      nir_def_init(&new_intrin->instr, &new_intrin->def,
+                   intrin->def.num_components, intrin->def.bit_size);
+   }
+
+   nir_builder_instr_insert(b, &new_intrin->instr);
+   return new_intrin;
+}
+
+/* Emit image intrinsic for a range [start, end) of array indices using binary search */
+static nir_def *
+emit_indirect_image_binary_search(nir_builder *b, nir_intrinsic_instr *intrin,
+                                  nir_deref_instr *deref,
+                                  nir_def *index,
+                                  int start, int end)
+{
+   assert(start < end);
+
+   bool has_dest = nir_intrinsic_infos[intrin->intrinsic].has_dest;
+
+   if (start == end - 1) {
+      /* Base case: emit intrinsic with constant index */
+      nir_deref_instr *new_deref = build_deref_with_const_index(b, deref, start);
+      nir_intrinsic_instr *new_intrin =
+         clone_image_intrin_with_deref(b, intrin, new_deref);
+      return has_dest ? &new_intrin->def : NULL;
+   } else {
+      /* Binary search: split into two halves */
+      int mid = start + (end - start) / 2;
+
+      nir_push_if(b, nir_ilt_imm(b, index, mid));
+      nir_def *then_result = emit_indirect_image_binary_search(b, intrin,
+                                                               deref, index,
+                                                               start, mid);
+      nir_push_else(b, NULL);
+      nir_def *else_result = emit_indirect_image_binary_search(b, intrin,
+                                                               deref, index,
+                                                               mid, end);
+      nir_pop_if(b, NULL);
+
+      return has_dest ? nir_if_phi(b, then_result, else_result) : NULL;
+   }
+}
+
+static bool
+lower_image_deref_to_if_else(nir_builder *b, nir_intrinsic_instr *intrin)
+{
+   /* Check if this is an image deref intrinsic */
+   if (!nir_intrinsic_has_image_dim(intrin))
+      return false;
+
+   /* Image deref is always src 0 */
+   nir_deref_instr *deref = nir_src_as_deref(intrin->src[0]);
+   if (!deref || !deref_has_indirect(deref))
+      return false;
+
+   /* Get the indirect index and array length */
+   nir_def *index = NULL;
+   uint32_t array_len = 0;
+
+   if (!get_first_indirect_info(deref, &index, &array_len))
+      return false;
+
+   /* Limit array size to prevent code explosion */
+   if (array_len > 64)
+      return false;
+
+   b->cursor = nir_before_instr(&intrin->instr);
+
+   /* Emit the if-else tree using binary search */
+   nir_def *result = emit_indirect_image_binary_search(b, intrin, deref,
+                                                       index, 0, array_len);
+
+   /* Replace original instruction */
+   if (nir_intrinsic_infos[intrin->intrinsic].has_dest) {
+      nir_def_replace(&intrin->def, result);
+   } else {
+      nir_instr_remove(&intrin->instr);
+   }
+
+   return true;
+}
+
+static bool
+lower_indirect_tex_derefs_block(nir_block *block, nir_builder *b)
+{
+   bool progress = false;
+
+   nir_foreach_instr_safe(instr, block) {
+      if (instr->type == nir_instr_type_tex) {
+         nir_tex_instr *tex = nir_instr_as_tex(instr);
+         if (lower_tex_deref_to_if_else(b, tex))
+            progress = true;
+      } else if (instr->type == nir_instr_type_intrinsic) {
+         nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+         switch (intrin->intrinsic) {
+         case nir_intrinsic_image_deref_load:
+         case nir_intrinsic_image_deref_store:
+         case nir_intrinsic_image_deref_atomic:
+         case nir_intrinsic_image_deref_atomic_swap:
+         case nir_intrinsic_image_deref_size:
+         case nir_intrinsic_image_deref_samples:
+         case nir_intrinsic_image_deref_format:
+         case nir_intrinsic_image_deref_order:
+            if (lower_image_deref_to_if_else(b, intrin))
+               progress = true;
+            break;
+         default:
+            break;
+         }
+      }
+   }
+
+   return progress;
+}
+
+static bool
+lower_indirect_tex_derefs_impl(nir_function_impl *impl)
+{
+   bool progress = false;
+   nir_builder b = nir_builder_create(impl);
+
+   nir_foreach_block_safe(block, impl) {
+      if (lower_indirect_tex_derefs_block(block, &b))
+         progress = true;
+   }
+
+   return nir_progress(progress, impl,
+                       progress ? nir_metadata_none : nir_metadata_all);
+}
+
+/**
+ * Lower indirect texture/sampler array derefs to if-else trees.
+ *
+ * This pass enables shaderSampledImageArrayDynamicIndexing and
+ * shaderStorageImageArrayDynamicIndexing features on V3D by converting
+ * dynamic array indexing to a series of constant-index accesses.
+ */
+static bool
+v3dv_nir_lower_indirect_tex_derefs(nir_shader *shader)
+{
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, shader) {
+      if (lower_indirect_tex_derefs_impl(impl))
+         progress = true;
+   }
+
+   return progress;
 }
 
 static bool
@@ -577,13 +976,6 @@ lower_vulkan_resource_index(nir_builder *b,
          pipeline_get_descriptor_map(state->pipeline, binding_layout->type,
                                      b->shader->info.stage, false);
 
-      if (!const_val) {
-         mesa_loge("V3D_WEBGPU_OVERRIDE: Dawn shader uses dynamic descriptor "
-                   "indexing (type=%d) which is not implemented — expect "
-                   "corruption", binding_layout->type);
-         UNREACHABLE("non-constant vulkan_resource_index array index");
-      }
-
       /* At compile-time we will need to know if we are processing a UBO load
        * for an inline or a regular UBO so we can handle inline loads like
        * push constants. At the level of NIR level however, the inline
@@ -599,12 +991,38 @@ lower_vulkan_resource_index(nir_builder *b,
          start_index += MAX_INLINE_UNIFORM_BUFFERS;
       }
 
-      index = descriptor_map_add(descriptor_map, set, binding,
-                                 const_val->u32,
-                                 binding_layout->array_size,
-                                 start_index,
-                                 true /* sampler_is_32b: doesn't really apply for this case */,
-                                 0);
+      if (const_val) {
+         /* Constant index: use direct mapping (existing behavior) */
+         index = descriptor_map_add(descriptor_map, set, binding,
+                                    const_val->u32,
+                                    binding_layout->array_size,
+                                    start_index,
+                                    true /* sampler_is_32b: doesn't really apply for this case */,
+                                    0);
+      } else {
+         /* Dynamic index: add all descriptors in the array and return
+          * base index. The backend compiler will add the dynamic offset.
+          */
+         uint32_t base_index = UINT32_MAX;
+         for (uint32_t i = 0; i < binding_layout->array_size; i++) {
+            uint32_t desc_index = descriptor_map_add(descriptor_map, set, binding,
+                                                     i, binding_layout->array_size,
+                                                     start_index,
+                                                     true, 0);
+            if (i == 0)
+               base_index = desc_index;
+         }
+         assert(base_index != UINT32_MAX);
+
+         /* Inline uniform blocks don't support dynamic indexing */
+         if (binding_layout->type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK)
+            UNREACHABLE("dynamic indexing of inline uniform blocks not supported");
+
+         /* Build the index expression: base_index + dynamic_offset */
+         nir_def *dynamic_index = nir_iadd_imm(b, instr->src[0].ssa, base_index);
+         nir_def_replace(&instr->def, nir_vec2(b, dynamic_index, nir_imm_int(b, 0)));
+         return;
+      }
       break;
    }
 
@@ -632,28 +1050,24 @@ tex_instr_get_and_remove_plane_src(nir_tex_instr *tex)
    return plane;
 }
 
-/* Returns true if we need 32bit, so we know what size to use when we do not
- * have a sampler object
+/*
+ * Traverses a deref chain to compute array indexing information.
+ * Returns the base variable deref and computes the base_index (for constant
+ * indices) and index (for dynamic indices).
  */
-static bool
-lower_tex_src(nir_builder *b,
-              nir_tex_instr *instr,
-              unsigned src_idx,
-              struct lower_pipeline_layout_state *state)
+static nir_deref_instr *
+lower_deref_compute_index(nir_builder *b,
+                          nir_deref_instr *deref,
+                          unsigned *base_index_out,
+                          nir_def **index_out,
+                          unsigned *array_elements_out)
 {
    nir_def *index = NULL;
    unsigned base_index = 0;
    unsigned array_elements = 1;
-   nir_tex_src *src = &instr->src[src_idx];
-   bool is_sampler = src->src_type == nir_tex_src_sampler_deref;
 
-   uint8_t plane = tex_instr_get_and_remove_plane_src(instr);
-
-   /* We compute first the offsets */
-   nir_deref_instr *deref = nir_def_as_deref(src->src.ssa);
    while (deref->deref_type != nir_deref_type_var) {
-      nir_deref_instr *parent =
-         nir_def_as_deref(deref->parent.ssa);
+      nir_deref_instr *parent = nir_def_as_deref(deref->parent.ssa);
 
       assert(deref->deref_type == nir_deref_type_array);
 
@@ -679,6 +1093,34 @@ lower_tex_src(nir_builder *b,
 
    if (index)
       index = nir_umin(b, index, nir_imm_int(b, array_elements - 1));
+
+   *base_index_out = base_index;
+   *index_out = index;
+   *array_elements_out = array_elements;
+   return deref;
+}
+
+/* Returns true if we need 32bit, so we know what size to use when we do not
+ * have a sampler object
+ */
+static bool
+lower_tex_src(nir_builder *b,
+              nir_tex_instr *instr,
+              unsigned src_idx,
+              struct lower_pipeline_layout_state *state)
+{
+   nir_def *index = NULL;
+   unsigned base_index = 0;
+   unsigned array_elements = 1;
+   nir_tex_src *src = &instr->src[src_idx];
+   bool is_sampler = src->src_type == nir_tex_src_sampler_deref;
+
+   uint8_t plane = tex_instr_get_and_remove_plane_src(instr);
+
+   /* Compute the offsets by traversing the deref chain */
+   nir_deref_instr *deref = nir_def_as_deref(src->src.ssa);
+   deref = lower_deref_compute_index(b, deref, &base_index, &index,
+                                     &array_elements);
 
    /* We have the offsets, we apply them, rewriting the source or removing
     * instr if needed
@@ -760,7 +1202,7 @@ lower_sampler(nir_builder *b,
       return false;
 
    /* If the instruction doesn't have a sampler (i.e. txf) we use backend_flags
-    * to bind a default sampler state to configure precission.
+    * to bind a default sampler state to configure precision.
     */
    if (sampler_idx < 0) {
       state->needs_default_sampler_state = true;
@@ -771,7 +1213,6 @@ lower_sampler(nir_builder *b,
    return true;
 }
 
-/* FIXME: really similar to lower_tex_src, perhaps refactor? */
 static void
 lower_image_deref(nir_builder *b,
                   nir_intrinsic_instr *instr,
@@ -782,34 +1223,8 @@ lower_image_deref(nir_builder *b,
    unsigned array_elements = 1;
    unsigned base_index = 0;
 
-   while (deref->deref_type != nir_deref_type_var) {
-      nir_deref_instr *parent =
-         nir_def_as_deref(deref->parent.ssa);
-
-      assert(deref->deref_type == nir_deref_type_array);
-
-      if (nir_src_is_const(deref->arr.index) && index == NULL) {
-         /* We're still building a direct index */
-         base_index += nir_src_as_uint(deref->arr.index) * array_elements;
-      } else {
-         if (index == NULL) {
-            /* We used to be direct but not anymore */
-            index = nir_imm_int(b, base_index);
-            base_index = 0;
-         }
-
-         index = nir_iadd(b, index,
-                          nir_imul_imm(b, deref->arr.index.ssa,
-                                       array_elements));
-      }
-
-      array_elements *= glsl_get_length(parent->type);
-
-      deref = parent;
-   }
-
-   if (index)
-      nir_umin(b, index, nir_imm_int(b, array_elements - 1));
+   deref = lower_deref_compute_index(b, deref, &base_index, &index,
+                                     &array_elements);
 
    uint32_t set = deref->var->data.descriptor_set;
    uint32_t binding = deref->var->data.binding;
@@ -1133,6 +1548,7 @@ v3d_fs_key_set_color_attachment(struct v3d_fs_key *key,
     * need to know the color buffer format and swizzle for that
     */
    if (key->logicop_func != PIPE_LOGICOP_COPY ||
+       key->dynamic_logicop_func ||
        key->software_blend) {
       /* Framebuffer formats should be single plane */
       assert(vk_format_get_plane_count(fb_format) == 1);
@@ -1146,7 +1562,14 @@ v3d_fs_key_set_color_attachment(struct v3d_fs_key *key,
       struct vk_color_blend_attachment_state *att =
          &p_stage->pipeline->dynamic_graphics_state.cb.attachments[index];
 
-      if (att->blend_enable) {
+      /* When blend enables are dynamic, always compile with actual blend
+       * factors. The shader will conditionally apply blending at runtime.
+       * When blend enables are static and disabled, use replace mode.
+       */
+      bool use_blend_factors = att->blend_enable ||
+                               p_stage->pipeline->blend.dynamic_blend_enables;
+
+      if (use_blend_factors) {
          key->blend[index].rgb_func = vk_blend_op_to_pipe(att->color_blend_op);
          key->blend[index].alpha_func = vk_blend_op_to_pipe(att->alpha_blend_op);
          key->blend[index].rgb_dst_factor = vk_blend_factor_to_pipe(att->dst_color_blend_factor);
@@ -1190,7 +1613,8 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
                              const struct vk_render_pass_state *rendering_info,
                              const struct v3dv_pipeline_stage *p_stage,
                              bool has_geometry_shader,
-                             uint32_t ucp_enables)
+                             uint32_t ucp_enables,
+                             uint32_t cull_enables)
 {
    assert(p_stage->stage == BROADCOM_SHADER_FRAGMENT);
 
@@ -1209,9 +1633,10 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
     * The only lowering we are interested is specific to the fragment shader,
     * where we want to emit discards to honor writes to gl_ClipDistance[] in
     * previous stages. This is done via nir_lower_clip_fs() so we only set up
-    * the ucp enable mask for that stage.
+    * the ucp enable mask for that stage. Same applies to cull distances.
     */
    key->ucp_enables = ucp_enables;
+   key->cull_enables = cull_enables;
 
    const struct vk_input_assembly_state *ia = state->ia;
    assert(ia);
@@ -1263,6 +1688,9 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
    key->swap_color_rb = 0;
 
    key->software_blend = p_stage->pipeline->blend.use_software;
+   key->dynamic_blend_enables = p_stage->pipeline->blend.dynamic_blend_enables;
+   key->dynamic_blend_equations = p_stage->pipeline->blend.dynamic_blend_equations;
+   key->dynamic_logicop_func = p_stage->pipeline->blend.dynamic_logicop_func;
 
    for (uint32_t i = 0; i < rendering_info->color_attachment_count; i++) {
       if (rendering_info->color_attachment_formats[i] == VK_FORMAT_UNDEFINED)
@@ -1815,6 +2243,12 @@ pipeline_lower_nir(struct v3dv_pipeline *pipeline,
    index = descriptor_map_add(&maps->sampler_map, -2, -2, -2, 0, 0, true, 0);
    assert(index == V3DV_NO_SAMPLER_32BIT_IDX);
 
+   /* Lower indirect texture/sampler/image array accesses to if-else trees.
+    * This must be done before lower_pipeline_layout_info since V3D requires
+    * constant indices for texture/image operations.
+    */
+   NIR_PASS(_, p_stage->nir, v3dv_nir_lower_indirect_tex_derefs);
+
    /* Apply the actual pipeline layout to UBOs, SSBOs, and textures */
    bool needs_default_sampler_state = false;
    NIR_PASS(_, p_stage->nir, lower_pipeline_layout_info, pipeline, layout,
@@ -1845,6 +2279,23 @@ get_ucp_enable_mask(struct v3dv_pipeline_stage *p_stage)
 
    nir_foreach_variable_with_modes(var, shader, nir_var_shader_out) {
       if (var->data.location == VARYING_SLOT_CLIP_DIST0) {
+         assert(var->data.compact);
+         return (1 << glsl_get_length(var->type)) - 1;
+      }
+   }
+   return 0;
+}
+
+/* Similar to get_ucp_enable_mask but for cull distances */
+static uint32_t
+get_cull_enable_mask(struct v3dv_pipeline_stage *p_stage)
+{
+   assert(p_stage->stage == BROADCOM_SHADER_VERTEX);
+   const nir_shader *shader = p_stage->nir;
+   assert(shader);
+
+   nir_foreach_variable_with_modes(var, shader, nir_var_shader_out) {
+      if (var->data.location == VARYING_SLOT_CULL_DIST0) {
          assert(var->data.compact);
          return (1 << glsl_get_length(var->type)) - 1;
       }
@@ -1991,7 +2442,8 @@ pipeline_compile_fragment_shader(struct v3dv_pipeline *pipeline,
    struct v3d_fs_key key;
    pipeline_populate_v3d_fs_key(&key, state, &pipeline->rendering_info,
                                 p_stage_fs, p_stage_gs != NULL,
-                                get_ucp_enable_mask(p_stage_vs));
+                                get_ucp_enable_mask(p_stage_vs),
+                                get_cull_enable_mask(p_stage_vs));
 
    if (key.is_points) {
       assert(key.point_coord_upper_left);
@@ -2045,6 +2497,9 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
    }
 
    key->software_blend = pipeline->blend.use_software;
+   key->dynamic_blend_enables = pipeline->blend.dynamic_blend_enables;
+   key->dynamic_blend_equations = pipeline->blend.dynamic_blend_equations;
+   key->dynamic_logicop_func = pipeline->blend.dynamic_logicop_func;
 
    struct vk_render_pass_state *ri = &pipeline->rendering_info;
    for (uint32_t i = 0; i < ri->color_attachment_count; i++) {
@@ -2060,6 +2515,7 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
        * need to know the color buffer format and swizzle for that
        */
       if (key->logicop_func != PIPE_LOGICOP_COPY ||
+          key->dynamic_logicop_func ||
           key->software_blend) {
          /* Framebuffer formats should be single plane */
          assert(vk_format_get_plane_count(fb_format) == 1);
@@ -2073,7 +2529,14 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
          struct vk_color_blend_attachment_state *att =
             &pipeline->dynamic_graphics_state.cb.attachments[i];
 
-         if (att->blend_enable) {
+         /* When blend enables are dynamic, always compile with actual blend
+          * factors. The shader will conditionally apply blending at runtime.
+          * When blend enables are static and disabled, use replace mode.
+          */
+         bool use_blend_factors = att->blend_enable ||
+                                  pipeline->blend.dynamic_blend_enables;
+
+         if (use_blend_factors) {
             key->blend[i].rgb_func = vk_blend_op_to_pipe(att->color_blend_op);
             key->blend[i].alpha_func = vk_blend_op_to_pipe(att->alpha_blend_op);
             key->blend[i].rgb_dst_factor = vk_blend_factor_to_pipe(att->dst_color_blend_factor);
@@ -2440,6 +2903,78 @@ pipeline_check_buffer_device_address(struct v3dv_pipeline *pipeline)
    pipeline->uses_buffer_device_address = false;
 }
 
+/**
+ * Generate transform feedback output specs from NIR xfb_info.
+ * This is similar to v3d_set_transform_feedback_outputs in Gallium.
+ */
+static void
+pipeline_set_xfb_outputs(struct v3dv_pipeline *pipeline,
+                         nir_shader *vs_nir)
+{
+   nir_xfb_info *xfb = vs_nir->xfb_info;
+   if (!xfb || xfb->output_count == 0) {
+      pipeline->tf.num_specs = 0;
+      return;
+   }
+
+   /* Map from location to VPM offset. We need to know where each varying
+    * ends up in the VPM to generate the TF specs.
+    */
+   uint32_t slot_count = 0;
+
+   for (uint32_t buffer = 0; buffer < MAX_TF_BUFFERS; buffer++) {
+      pipeline->tf.stride[buffer] = xfb->buffers[buffer].stride;
+
+      uint32_t buffer_offset = 0;
+      uint32_t vpm_start = slot_count;
+
+      for (uint32_t i = 0; i < xfb->output_count; i++) {
+         const nir_xfb_output_info *output = &xfb->outputs[i];
+
+         if (output->buffer != buffer)
+            continue;
+
+         /* Calculate how many components (32-bit values) to output */
+         uint32_t num_components = util_bitcount(output->component_mask);
+         if (num_components == 0)
+            continue;
+
+         /* The component_offset tells us which component of the varying
+          * to start reading from, and component_mask tells us which
+          * components to output.
+          */
+         uint32_t vpm_offset = vpm_start + output->component_offset;
+
+         /* Pack the TF output data spec:
+          * - first_shaded_vertex_value_to_output: VPM offset
+          * - number_of_consecutive_vertex_values: num_components - 1
+          * - output_buffer: buffer index
+          */
+         assert(pipeline->tf.num_specs < ARRAY_SIZE(pipeline->tf.specs));
+
+         /* Pack using V3D42 format (same as V3D71) */
+         uint16_t spec = 0;
+         spec |= (vpm_offset & 0xFF);               /* first value: bits 0-7 */
+         spec |= ((num_components - 1) & 0xF) << 8; /* num values - 1: bits 8-11 */
+         spec |= (buffer & 0x3) << 12;              /* buffer: bits 12-13 */
+         /* stream in bits 14-15, but we only support stream 0 */
+
+         pipeline->tf.specs[pipeline->tf.num_specs] = spec;
+
+         /* Also create psiz variant (VPM offset + 1 for point size) */
+         uint16_t spec_psiz = spec;
+         spec_psiz = (spec_psiz & ~0xFF) | ((vpm_offset + 1) & 0xFF);
+         pipeline->tf.specs_psiz[pipeline->tf.num_specs] = spec_psiz;
+
+         pipeline->tf.num_specs++;
+
+         buffer_offset = output->offset + num_components * 4;
+      }
+
+      slot_count += xfb->buffers[buffer].varying_count;
+   }
+}
+
 /*
  * It compiles a pipeline. Note that it also allocate internal object, but if
  * some allocations success, but other fails, the method is not freeing the
@@ -2663,6 +3198,14 @@ pipeline_compile_graphics(struct v3dv_pipeline *pipeline,
 
    pipeline_lower_nir(pipeline, p_stage_vs, pipeline->layout);
    lower_vs_io(p_stage_vs->nir);
+
+   /* Generate transform feedback specs from the last vertex processing stage.
+    * We need to gather xfb_info if it wasn't already populated by spirv_to_nir.
+    */
+   nir_shader *xfb_shader = p_stage_gs ? p_stage_gs->nir : p_stage_vs->nir;
+   if (!xfb_shader->xfb_info)
+      nir_shader_gather_xfb_info(xfb_shader);
+   pipeline_set_xfb_outputs(pipeline, xfb_shader);
 
    /* Compiling to vir */
 
@@ -2941,7 +3484,7 @@ pipeline_init_dynamic_state(struct v3dv_device *device,
 
    if (BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_VP_VIEWPORTS) ||
        BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_VP_SCISSORS)) {
-      /* FIXME: right now we don't support multiViewport so viewporst[0] would
+      /* FIXME: right now we don't support multiViewport so viewports[0] would
        * work now, but would need to change if we allow multiple viewports.
        */
       v3d_X((&device->devinfo), viewport_compute_xform)(&dyn->vp.viewports[0],
@@ -3043,6 +3586,22 @@ pipeline_init(struct v3dv_pipeline *pipeline,
    pipeline_set_sample_mask(pipeline, pipeline_state.ms);
    pipeline_set_sample_rate_shading(pipeline, pipeline_state.ms);
    pipeline->line_smooth = enable_line_smooth(pipeline, pipeline_state.rs);
+
+   /* Check if blend enables are dynamic (VK_EXT_extended_dynamic_state3) */
+   pipeline->blend.dynamic_blend_enables =
+      BITSET_TEST(pipeline_state.dynamic, MESA_VK_DYNAMIC_CB_BLEND_ENABLES);
+
+   /* Check if blend equations are dynamic (VK_EXT_extended_dynamic_state3) */
+   pipeline->blend.dynamic_blend_equations =
+      BITSET_TEST(pipeline_state.dynamic, MESA_VK_DYNAMIC_CB_BLEND_EQUATIONS);
+
+   /* Dynamic blend equations require software blend */
+   if (pipeline->blend.dynamic_blend_equations)
+      pipeline->blend.use_software = true;
+
+   /* Check if logic op func is dynamic (VK_EXT_extended_dynamic_state2) */
+   pipeline->blend.dynamic_logicop_func =
+      BITSET_TEST(pipeline_state.dynamic, MESA_VK_DYNAMIC_CB_LOGIC_OP);
 
    result = pipeline_compile_graphics(pipeline, cache, &pipeline_state,
                                       pCreateInfo, pAllocator);

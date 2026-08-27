@@ -366,10 +366,22 @@ struct v3dv_vertex_binding {
    VkDeviceSize size;
 };
 
+/* Push descriptor set for VK_KHR_push_descriptor.
+ * Uses a pointer to v3dv_descriptor_set since it has a flexible array member
+ * and cannot be embedded directly.
+ */
+struct v3dv_push_descriptor_set {
+   struct v3dv_descriptor_set *set;
+   uint32_t capacity;
+};
+
 struct v3dv_descriptor_state {
    struct v3dv_descriptor_set *descriptor_sets[MAX_SETS];
    uint32_t valid;
    uint32_t dynamic_offsets[MAX_DYNAMIC_BUFFERS];
+
+   /* Push descriptor support */
+   struct v3dv_push_descriptor_set push_set;
 };
 
 struct v3dv_cmd_pipeline_state {
@@ -578,6 +590,32 @@ struct v3dv_cmd_buffer_state {
     * so we need to keep track of it in the cmd_buffer state
     */
    bool incompatible_ez_test;
+
+   /* VK_EXT_transform_feedback state */
+   struct {
+      /* Buffers bound via vkCmdBindTransformFeedbackBuffersEXT */
+      struct {
+         struct v3dv_buffer *buffer;
+         VkDeviceSize offset;
+         VkDeviceSize size;
+      } buffers[MAX_TF_BUFFERS];
+      uint32_t buffer_count;
+
+      /* Counter buffers for pausing/resuming */
+      struct {
+         struct v3dv_buffer *buffer;
+         VkDeviceSize offset;
+      } counter_buffers[MAX_TF_BUFFERS];
+
+      /* True if transform feedback is currently active (between Begin and End) */
+      bool active;
+
+      /* True if transform feedback was paused with counterBuffers in EndTF */
+      bool paused;
+
+      /* Primitives written counter for queries */
+      uint32_t primitives_written;
+   } tf;
 };
 
 void

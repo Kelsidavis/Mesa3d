@@ -43,6 +43,7 @@ libv3dv_files = files(
   'v3dv_event.c',
   'v3dv_format_table.h',
   'v3dv_formats.c',
+  'v3dv_host_copy.c',
   'v3dv_image.c',
   'v3dv_image.h',
   'v3dv_limits.h',
@@ -155,7 +156,7 @@ broadcom_icd = custom_target(
   output : 'broadcom_icd.' + vulkan_manifest_suffix,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.3', '--xml', '@INPUT1@',
+    '--api-version', '1.4', '--xml', '@INPUT1@',
     '--sizeof-pointer', sizeof_pointer,
     '--icd-lib-path', vulkan_icd_lib_path,
     '--icd-filename', icd_file_name,
@@ -174,7 +175,7 @@ _dev_icd = custom_target(
   output : _dev_icdname,
   command : [
     prog_python, '@INPUT0@',
-    '--api-version', '1.3', '--xml', '@INPUT1@',
+    '--api-version', '1.4', '--xml', '@INPUT1@',
     '--sizeof-pointer', sizeof_pointer,
     '--icd-lib-path', meson.current_build_dir(),
     '--icd-filename', icd_file_name,

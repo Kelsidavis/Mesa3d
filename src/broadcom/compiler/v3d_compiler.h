@@ -315,6 +315,44 @@ enum quniform_contents {
         QUNIFORM_BLEND_CONSTANT_G,
         QUNIFORM_BLEND_CONSTANT_B,
         QUNIFORM_BLEND_CONSTANT_A,
+
+        /**
+         * Dynamic alpha-to-coverage and alpha-to-one enable flags.
+         * Used for VK_EXT_extended_dynamic_state3.
+         */
+        QUNIFORM_ALPHA_TO_COVERAGE_ENABLED,
+        QUNIFORM_ALPHA_TO_ONE_ENABLED,
+
+        /**
+         * Dynamic logic op enable flag.
+         * Used for VK_EXT_extended_dynamic_state3.
+         */
+        QUNIFORM_LOGIC_OP_ENABLED,
+
+        /**
+         * Dynamic blend enable flag (per render target).
+         * Data contains the render target index.
+         * Used for VK_EXT_extended_dynamic_state3.
+         */
+        QUNIFORM_BLEND_ENABLED,
+
+        /**
+         * Dynamic logic op function.
+         * Used for VK_EXT_extended_dynamic_state2.
+         */
+        QUNIFORM_LOGIC_OP_FUNC,
+
+        /**
+         * Dynamic blend equation parameters (per render target).
+         * Data contains the render target index.
+         * Used for VK_EXT_extended_dynamic_state3.
+         */
+        QUNIFORM_BLEND_RGB_FUNC,
+        QUNIFORM_BLEND_RGB_SRC_FACTOR,
+        QUNIFORM_BLEND_RGB_DST_FACTOR,
+        QUNIFORM_BLEND_ALPHA_FUNC,
+        QUNIFORM_BLEND_ALPHA_SRC_FACTOR,
+        QUNIFORM_BLEND_ALPHA_DST_FACTOR,
 };
 
 static inline uint32_t v3d_unit_data_create(uint32_t unit, uint32_t value)
@@ -381,6 +419,8 @@ struct v3d_fs_key {
         bool can_earlyz_with_discard;
         bool software_blend;
         bool ignore_sample_mask;
+        bool dynamic_blend_enables;
+        bool dynamic_blend_equations;
         /* Mask of which color render targets are present. */
         uint8_t cbufs;
         uint8_t swap_color_rb;
@@ -392,6 +432,7 @@ struct v3d_fs_key {
         uint8_t snorm;
 
         uint8_t ucp_enables;
+        uint8_t cull_enables;
 
         /* Color format information per render target. Only set when logic
          * operations are enabled, when fbfetch is in use or when falling back
@@ -415,6 +456,7 @@ struct v3d_fs_key {
         } blend[V3D_MAX_DRAW_BUFFERS];
 
         enum pipe_logicop logicop_func;
+        bool dynamic_logicop_func;
         uint32_t point_sprite_mask;
 
         /* If the fragment shader reads gl_PrimitiveID then we have 2 scenarios:
@@ -468,6 +510,12 @@ struct qblock {
         struct qblock *successors[2];
 
         int index;
+
+        /* Loop nesting depth for this block, used for register allocation
+         * to scale spill costs (variables in inner loops are more expensive
+         * to spill).
+         */
+        uint8_t loop_depth;
 
         /* Instruction IPs for the first and last instruction of the block.
          * Set by qpu_schedule.c.
@@ -809,6 +857,9 @@ struct v3d_compile {
          */
         struct qinst *restore_last_thrsw;
         bool restore_scoreboard_lock;
+
+        /* Current loop nesting depth during NIR to VIR translation */
+        uint8_t current_loop_depth;
 
         /* Whether we are in the process of spilling registers for
          * register allocation
@@ -1190,9 +1241,13 @@ bool vir_opt_vpm(struct v3d_compile *c);
 bool vir_opt_constant_alu(struct v3d_compile *c);
 bool vir_opt_alu(struct v3d_compile *c);
 bool vir_opt_redundant_setnnmode(struct v3d_compile *c);
+bool vir_opt_constant_propagate(struct v3d_compile *c);
+bool vir_opt_coalesce_tmu_write(struct v3d_compile *c);
 bool v3d_nir_lower_io(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_line_smooth(nir_shader *shader);
 bool v3d_nir_lower_logic_ops(nir_shader *s, struct v3d_compile *c);
+bool v3d_nir_lower_logic_ops_dynamic(nir_shader *s, struct v3d_compile *c,
+                                     nir_def *dyn_enable);
 bool v3d_nir_lower_scratch(nir_shader *s);
 bool v3d_nir_lower_txf_ms(nir_shader *s);
 bool v3d_nir_lower_image_load_store(nir_shader *s, struct v3d_compile *c);

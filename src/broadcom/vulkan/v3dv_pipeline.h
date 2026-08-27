@@ -46,10 +46,13 @@ struct nir_shader_compiler_options;
 struct v3dv_pipeline_key {
    uint8_t topology;
    uint8_t logicop_func;
+   bool dynamic_logicop_func;
+   bool dynamic_blend_equations;
    bool msaa;
    bool sample_alpha_to_coverage;
    bool sample_alpha_to_one;
    bool software_blend;
+   bool dynamic_blend_enables;
    uint8_t cbufs;
    struct {
       enum pipe_format format;
@@ -283,7 +286,8 @@ enum v3dv_cmd_dirty_bits {
    V3DV_CMD_DIRTY_OCCLUSION_QUERY           = 1 << 8,
    V3DV_CMD_DIRTY_VIEW_INDEX                = 1 << 9,
    V3DV_CMD_DIRTY_DRAW_ID                   = 1 << 10,
-   V3DV_CMD_DIRTY_ALL                       = (1 << 10) - 1,
+   V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK        = 1 << 11,
+   V3DV_CMD_DIRTY_ALL                       = (1 << 12) - 1,
 };
 
 struct v3dv_dynamic_state {
@@ -429,6 +433,15 @@ struct v3dv_pipeline {
        */
       bool use_software;
 
+      /* True if blend enables are dynamic (VK_EXT_extended_dynamic_state3). */
+      bool dynamic_blend_enables;
+
+      /* True if blend equations are dynamic (VK_EXT_extended_dynamic_state3). */
+      bool dynamic_blend_equations;
+
+      /* True if logic op func is dynamic (VK_EXT_extended_dynamic_state2). */
+      bool dynamic_logicop_func;
+
       /* Per-RT bit mask with blend enables. */
       uint8_t enables;
       /* Per-RT prepacked blend config packets */
@@ -454,6 +467,19 @@ struct v3dv_pipeline {
    uint8_t vertex_attrs[V3DV_GL_SHADER_STATE_ATTRIBUTE_RECORD_LENGTH *
                         MAX_VERTEX_ATTRIBS];
    uint8_t stencil_cfg[2][V3DV_STENCIL_CFG_LENGTH];
+
+   /* VK_EXT_transform_feedback */
+   struct {
+      /* Prepacked TRANSFORM_FEEDBACK_OUTPUT_DATA_SPEC packets.
+       * Each spec is 16 bits, max 16 specs per Gallium convention.
+       */
+      uint16_t specs[16];
+      /* Alternate specs with point size offset (+1) for when psiz is written */
+      uint16_t specs_psiz[16];
+      uint32_t num_specs;
+      /* Per-buffer strides in bytes */
+      uint16_t stride[MAX_TF_BUFFERS];
+   } tf;
 };
 
 struct v3dv_pipeline_layout {

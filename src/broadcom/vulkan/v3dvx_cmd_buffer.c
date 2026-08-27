@@ -1610,13 +1610,19 @@ v3dX(cmd_buffer_emit_sample_state)(struct v3dv_cmd_buffer *cmd_buffer)
    struct v3dv_job *job = cmd_buffer->state.job;
    assert(job);
 
+   struct vk_dynamic_graphics_state *dyn =
+      &cmd_buffer->vk.dynamic_graphics_state;
+
    v3dv_cl_ensure_space_with_branch(&job->bcl, cl_packet_length(SAMPLE_STATE));
    v3dv_return_if_oom(cmd_buffer, NULL);
 
    cl_emit(&job->bcl, SAMPLE_STATE, state) {
       state.coverage = 1.0f;
-      state.mask = pipeline->sample_mask;
+      /* VK_EXT_extended_dynamic_state3: dynamic sample mask */
+      state.mask = dyn->ms.sample_mask & 0xf;
    }
+
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_MS_SAMPLE_MASK);
 }
 
 void
@@ -1678,10 +1684,20 @@ v3dX(cmd_buffer_emit_color_write_mask)(struct v3dv_cmd_buffer *cmd_buffer)
    struct v3dv_job *job = cmd_buffer->state.job;
    v3dv_cl_ensure_space_with_branch(&job->bcl, cl_packet_length(COLOR_WRITE_MASKS));
 
-   struct v3dv_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
    struct v3dv_dynamic_state *v3dv_dyn = &cmd_buffer->state.dynamic;
-   uint32_t color_write_mask = ~v3dv_dyn->color_write_enable |
-                               pipeline->blend.color_write_masks;
+   struct vk_dynamic_graphics_state *vk_dyn = &cmd_buffer->vk.dynamic_graphics_state;
+
+   /* Compute color write masks from dynamic state. The hardware uses inverted
+    * logic where disabled channels have their bits set.
+    */
+   uint32_t color_write_masks = 0;
+   for (uint32_t i = 0; i < vk_dyn->cb.attachment_count; i++) {
+      uint8_t write_mask = vk_dyn->cb.attachments[i].write_mask;
+      color_write_masks |= (~write_mask & 0xf) << (4 * i);
+   }
+
+   /* Combine with color write enable (for VK_EXT_color_write_enable) */
+   uint32_t color_write_mask = ~v3dv_dyn->color_write_enable | color_write_masks;
 
 #if V3D_VERSION <= 42
    /* Only 4 RTs */
@@ -1694,6 +1710,8 @@ v3dX(cmd_buffer_emit_color_write_mask)(struct v3dv_cmd_buffer *cmd_buffer)
 
    BITSET_CLEAR(cmd_buffer->vk.dynamic_graphics_state.dirty,
                 MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES);
+   BITSET_CLEAR(cmd_buffer->vk.dynamic_graphics_state.dirty,
+                MESA_VK_DYNAMIC_CB_WRITE_MASKS);
 }
 
 static void
@@ -2059,6 +2077,31 @@ v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
          config.clockwise_primitives = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE;
       }
 
+      /* VK_EXT_extended_dynamic_state3: polygon mode */
+      if (dyn->rs.polygon_mode != VK_POLYGON_MODE_FILL) {
+         config.direct3d_wireframe_triangles_mode = true;
+         config.direct3d_point_fill_mode =
+            dyn->rs.polygon_mode == VK_POLYGON_MODE_POINT;
+      } else {
+         config.direct3d_wireframe_triangles_mode = false;
+         config.direct3d_point_fill_mode = false;
+      }
+
+      /* VK_EXT_extended_dynamic_state3: provoking vertex mode */
+      config.direct3d_provoking_vertex =
+         dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+
+      /* VK_EXT_extended_dynamic_state3: line rasterization mode */
+      if (dyn->rs.line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR)
+         config.line_rasterization = V3D_LINE_RASTERIZATION_DIAMOND_EXIT;
+      else
+         config.line_rasterization = V3D_LINE_RASTERIZATION_PERP_END_CAPS;
+
+      /* diamond-exit rasterization does not support oversample */
+      config.rasterizer_oversample_mode =
+         (config.line_rasterization == V3D_LINE_RASTERIZATION_PERP_END_CAPS &&
+          pipeline->msaa) ? 1 : 0;
+
       /* V3D 4.2 doesn't support depth bounds testing so we don't advertise that
        * feature and it shouldn't be used by any pipeline.
        */
@@ -2067,6 +2110,20 @@ v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
 #if V3D_VERSION >= 71
       config.depth_bounds_test_enable =
          dyn->ds.depth.bounds_test.enable && has_depth;
+
+      /* VK_EXT_extended_dynamic_state3: depth clip/clamp (V3D 7.1+) */
+      bool z_clamp_enable = dyn->rs.depth_clamp_enable;
+      bool z_clip_enable = vk_rasterization_state_depth_clip_enable(&dyn->rs);
+
+      if (z_clip_enable) {
+         /* VK_EXT_extended_dynamic_state3: depth clip negative one to one */
+         config.z_clipping_mode = dyn->vp.depth_clip_negative_one_to_one ?
+            V3D_Z_CLIP_MODE_MIN_ONE_TO_ONE : V3D_Z_CLIP_MODE_ZERO_TO_ONE;
+      } else {
+         config.z_clipping_mode = V3D_Z_CLIP_MODE_NONE;
+      }
+
+      config.z_clamp_mode = z_clamp_enable;
 #endif
 
       config.enable_depth_offset = dyn->rs.depth_bias.enable;
@@ -2078,6 +2135,14 @@ v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_DS_STENCIL_TEST_ENABLE);
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_BIAS_ENABLE);
    BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_POLYGON_MODE);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_PROVOKING_VERTEX);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_MODE);
+#if V3D_VERSION >= 71
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLAMP_ENABLE);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_RS_DEPTH_CLIP_ENABLE);
+   BITSET_CLEAR(dyn->dirty, MESA_VK_DYNAMIC_VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE);
+#endif
 }
 
 void
@@ -2103,6 +2168,7 @@ v3dX(cmd_buffer_emit_occlusion_query)(struct v3dv_cmd_buffer *cmd_buffer)
 
 static struct v3dv_job *
 cmd_buffer_subpass_split_for_barrier(struct v3dv_cmd_buffer *cmd_buffer,
+                                     uint8_t barrier_sources,
                                      bool is_bcl_barrier)
 {
    assert(cmd_buffer->state.subpass_idx != -1);
@@ -2113,8 +2179,10 @@ cmd_buffer_subpass_split_for_barrier(struct v3dv_cmd_buffer *cmd_buffer,
    if (!job)
       return NULL;
 
-   /* FIXME: we can do better than all barriers */
-   job->serialize = V3DV_BARRIER_ALL;
+   /* Only serialize against the barrier sources that actually require it,
+    * rather than all possible sources.
+    */
+   job->serialize = barrier_sources;
    job->needs_bcl_sync = is_bcl_barrier;
    return job;
 }
@@ -2220,8 +2288,17 @@ v3dX(cmd_buffer_execute_inside_pass)(struct v3dv_cmd_buffer *primary,
                   pending_barrier.bcl_buffer_access ||
                   pending_barrier.bcl_image_access;
 
+               /* Compute the actual barrier sources we need to serialize
+                * against: the secondary job's serialize flags plus any
+                * pending graphics barriers (since we're in a render pass).
+                */
+               uint8_t barrier_sources = secondary_job->serialize;
+               if (pending_barrier.dst_mask & V3DV_BARRIER_GRAPHICS_BIT)
+                  barrier_sources |= pending_barrier.src_mask_graphics;
+
                primary_job =
                   cmd_buffer_subpass_split_for_barrier(primary,
+                                                       barrier_sources,
                                                        needs_bcl_barrier);
                v3dv_return_if_oom(primary, NULL);
 
@@ -3052,4 +3129,70 @@ v3dX(cmd_buffer_prepare_suspend_job_for_submit)(struct v3dv_job *job)
       (v3dv_cmd_buffer_private_obj_destroy_cb)job_destroy_cb);
 
    return clone;
+}
+
+void
+v3dX(cmd_buffer_emit_transform_feedback)(struct v3dv_cmd_buffer *cmd_buffer)
+{
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+   struct v3dv_job *job = state->job;
+   assert(job);
+
+   /* Only emit TF state if transform feedback is active */
+   if (!state->tf.active)
+      return;
+
+   struct v3dv_pipeline *pipeline = state->gfx.pipeline;
+   assert(pipeline);
+
+   /* Check if the pipeline has transform feedback outputs */
+   bool has_tf = pipeline->tf.num_specs > 0;
+
+   /* Determine if we need psiz-adjusted specs. This happens when the vertex
+    * shader writes gl_PointSize, which shifts VPM offsets by 1.
+    */
+   struct v3dv_shader_variant *vs =
+      pipeline->shared_data->variants[BROADCOM_SHADER_VERTEX];
+   bool writes_psiz = vs && vs->prog_data.vs->writes_psiz;
+   const uint16_t *tf_specs = writes_psiz ? pipeline->tf.specs_psiz
+                                          : pipeline->tf.specs;
+
+   /* Emit TRANSFORM_FEEDBACK_SPECS packet */
+   v3dv_cl_ensure_space_with_branch(
+      &job->bcl, cl_packet_length(TRANSFORM_FEEDBACK_SPECS) +
+                 pipeline->tf.num_specs * 2);
+   v3dv_return_if_oom(cmd_buffer, NULL);
+
+   cl_emit(&job->bcl, TRANSFORM_FEEDBACK_SPECS, tfe) {
+      tfe.enable = has_tf;
+      tfe.number_of_16_bit_output_data_specs_following = pipeline->tf.num_specs;
+   }
+
+   /* Emit the prepacked TF output data specs */
+   for (uint32_t i = 0; i < pipeline->tf.num_specs; i++) {
+      cl_emit_prepacked(&job->bcl, &tf_specs[i]);
+   }
+
+   /* Emit TRANSFORM_FEEDBACK_BUFFER packets for bound buffers */
+   for (uint32_t i = 0; i < state->tf.buffer_count; i++) {
+      struct v3dv_buffer *buffer = state->tf.buffers[i].buffer;
+      if (!buffer)
+         continue;
+
+      v3dv_cl_ensure_space_with_branch(
+         &job->bcl, cl_packet_length(TRANSFORM_FEEDBACK_BUFFER));
+      v3dv_return_if_oom(cmd_buffer, NULL);
+
+      const uint32_t offset = buffer->mem_offset + state->tf.buffers[i].offset;
+
+      cl_emit(&job->bcl, TRANSFORM_FEEDBACK_BUFFER, output) {
+         output.buffer_address = v3dv_cl_address(buffer->mem->bo, offset);
+         output.buffer_size_in_32_bit_words = state->tf.buffers[i].size >> 2;
+         output.buffer_number = i;
+      }
+
+      v3dv_job_add_bo(job, buffer->mem->bo);
+   }
+
+   cmd_buffer->state.dirty &= ~V3DV_CMD_DIRTY_TRANSFORM_FEEDBACK;
 }

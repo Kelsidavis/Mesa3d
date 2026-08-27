@@ -28,12 +28,14 @@
 #include "v3dv_device.h"
 #include "v3dv_cmd_buffer.h"
 #include "v3dv_image.h"
+#include "vk_blend.h"
 
 /* Our Vulkan resource indices represent indices in descriptor maps which
  * include all shader stages, so we need to size the arrays below
  * accordingly. For now we only support a maximum of 3 stages: VS, GS, FS.
  */
 struct texture_bo_list {
+   uint32_t max_idx;
    struct v3dv_bo *tex[MAX_TOTAL_TEXTURE_SAMPLERS];
 };
 
@@ -43,6 +45,8 @@ struct state_bo_list {
 };
 
 struct buffer_bo_list {
+   uint32_t max_ubo_idx;
+   uint32_t max_ssbo_idx;
    struct v3dv_bo *ubo[MAX_TOTAL_UNIFORM_BUFFERS];
    struct v3dv_bo *ssbo[MAX_TOTAL_STORAGE_BUFFERS];
 };
@@ -161,6 +165,8 @@ write_tmu_p0(struct v3dv_cmd_buffer *cmd_buffer,
 
    assert(texture_idx < V3D_MAX_TEXTURE_SAMPLERS);
    tex_bos->tex[texture_idx] = texture_bo;
+   if (texture_idx >= tex_bos->max_idx)
+      tex_bos->max_idx = texture_idx + 1;
 
    struct v3dv_cl_reloc state_reloc =
       v3dv_descriptor_map_get_texture_shader_state(cmd_buffer->device, descriptor_state,
@@ -341,9 +347,13 @@ write_ubo_ssbo_uniforms(struct v3dv_cmd_buffer *cmd_buffer,
          if (content == QUNIFORM_UBO_ADDR) {
             assert(index < MAX_TOTAL_UNIFORM_BUFFERS);
             buffer_bos->ubo[index] = bo;
+            if (index >= buffer_bos->max_ubo_idx)
+               buffer_bos->max_ubo_idx = index + 1;
          } else {
             assert(index < MAX_TOTAL_STORAGE_BUFFERS);
             buffer_bos->ssbo[index] = bo;
+            if (index >= buffer_bos->max_ssbo_idx)
+               buffer_bos->max_ssbo_idx = index + 1;
          }
       }
    }
@@ -395,6 +405,12 @@ get_texture_size_from_image_view(struct v3dv_image_view *image_view,
    case QUNIFORM_TEXTURE_HEIGHT:
       return image_view->vk.extent.height;
    case QUNIFORM_IMAGE_DEPTH:
+      /* For storage images on sliced 3D views (VK_EXT_image_sliced_view_of_3d),
+       * return the sliced count instead of the full extent depth.
+       */
+      if (image_view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D)
+         return image_view->vk.storage.z_slice_count;
+      return image_view->vk.extent.depth;
    case QUNIFORM_TEXTURE_DEPTH:
       return image_view->vk.extent.depth;
    case QUNIFORM_IMAGE_ARRAY_SIZE:
@@ -698,6 +714,102 @@ v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
          cl_aligned_f(&uniforms, job->cmd_buffer->vk.dynamic_graphics_state.cb.blend_constants[3]);
          break;
 
+      case QUNIFORM_ALPHA_TO_COVERAGE_ENABLED:
+         cl_aligned_u32(&uniforms,
+            job->cmd_buffer->vk.dynamic_graphics_state.ms.alpha_to_coverage_enable ? 1 : 0);
+         break;
+
+      case QUNIFORM_ALPHA_TO_ONE_ENABLED:
+         cl_aligned_u32(&uniforms,
+            job->cmd_buffer->vk.dynamic_graphics_state.ms.alpha_to_one_enable ? 1 : 0);
+         break;
+
+      case QUNIFORM_LOGIC_OP_ENABLED:
+         cl_aligned_u32(&uniforms,
+            job->cmd_buffer->vk.dynamic_graphics_state.cb.logic_op_enable ? 1 : 0);
+         break;
+
+      case QUNIFORM_BLEND_ENABLED: {
+         uint32_t rt = data;
+         bool blend_enable = false;
+         if (rt < job->cmd_buffer->vk.dynamic_graphics_state.cb.attachment_count) {
+            blend_enable = job->cmd_buffer->vk.dynamic_graphics_state.cb.attachments[rt].blend_enable;
+         }
+         cl_aligned_u32(&uniforms, blend_enable ? 1 : 0);
+         break;
+      }
+
+      case QUNIFORM_LOGIC_OP_FUNC:
+         cl_aligned_u32(&uniforms,
+            job->cmd_buffer->vk.dynamic_graphics_state.cb.logic_op);
+         break;
+
+      case QUNIFORM_BLEND_RGB_FUNC: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendOp op = VK_BLEND_OP_ADD;
+         if (rt < dyn->cb.attachment_count)
+            op = dyn->cb.attachments[rt].color_blend_op;
+         cl_aligned_u32(&uniforms, vk_blend_op_to_pipe(op));
+         break;
+      }
+
+      case QUNIFORM_BLEND_RGB_SRC_FACTOR: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendFactor factor = VK_BLEND_FACTOR_ONE;
+         if (rt < dyn->cb.attachment_count)
+            factor = dyn->cb.attachments[rt].src_color_blend_factor;
+         cl_aligned_u32(&uniforms, vk_blend_factor_to_pipe(factor));
+         break;
+      }
+
+      case QUNIFORM_BLEND_RGB_DST_FACTOR: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendFactor factor = VK_BLEND_FACTOR_ZERO;
+         if (rt < dyn->cb.attachment_count)
+            factor = dyn->cb.attachments[rt].dst_color_blend_factor;
+         cl_aligned_u32(&uniforms, vk_blend_factor_to_pipe(factor));
+         break;
+      }
+
+      case QUNIFORM_BLEND_ALPHA_FUNC: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendOp op = VK_BLEND_OP_ADD;
+         if (rt < dyn->cb.attachment_count)
+            op = dyn->cb.attachments[rt].alpha_blend_op;
+         cl_aligned_u32(&uniforms, vk_blend_op_to_pipe(op));
+         break;
+      }
+
+      case QUNIFORM_BLEND_ALPHA_SRC_FACTOR: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendFactor factor = VK_BLEND_FACTOR_ONE;
+         if (rt < dyn->cb.attachment_count)
+            factor = dyn->cb.attachments[rt].src_alpha_blend_factor;
+         cl_aligned_u32(&uniforms, vk_blend_factor_to_pipe(factor));
+         break;
+      }
+
+      case QUNIFORM_BLEND_ALPHA_DST_FACTOR: {
+         uint32_t rt = data;
+         const struct vk_dynamic_graphics_state *dyn =
+            &job->cmd_buffer->vk.dynamic_graphics_state;
+         VkBlendFactor factor = VK_BLEND_FACTOR_ZERO;
+         if (rt < dyn->cb.attachment_count)
+            factor = dyn->cb.attachments[rt].dst_alpha_blend_factor;
+         cl_aligned_u32(&uniforms, vk_blend_factor_to_pipe(factor));
+         break;
+      }
+
       default:
          UNREACHABLE("unsupported quniform_contents uniform type\n");
       }
@@ -705,20 +817,23 @@ v3dv_write_uniforms_wg_offsets(struct v3dv_cmd_buffer *cmd_buffer,
 
    cl_end(&job->indirect, uniforms);
 
-   for (int i = 0; i < MAX_TOTAL_TEXTURE_SAMPLERS; i++) {
+   /* Only iterate up to the maximum used index for each BO list.
+    * This avoids iterating over potentially 72+ empty slots per dispatch.
+    */
+   for (uint32_t i = 0; i < tex_bos.max_idx; i++) {
       if (tex_bos.tex[i])
          v3dv_job_add_bo(job, tex_bos.tex[i]);
    }
 
-   for (int i = 0; i < state_bos.count; i++)
+   for (uint32_t i = 0; i < state_bos.count; i++)
       v3dv_job_add_bo(job, state_bos.states[i]);
 
-   for (int i = 0; i < MAX_TOTAL_UNIFORM_BUFFERS; i++) {
+   for (uint32_t i = 0; i < buffer_bos.max_ubo_idx; i++) {
       if (buffer_bos.ubo[i])
          v3dv_job_add_bo(job, buffer_bos.ubo[i]);
    }
 
-   for (int i = 0; i < MAX_TOTAL_STORAGE_BUFFERS; i++) {
+   for (uint32_t i = 0; i < buffer_bos.max_ssbo_idx; i++) {
       if (buffer_bos.ssbo[i])
          v3dv_job_add_bo(job, buffer_bos.ssbo[i]);
    }

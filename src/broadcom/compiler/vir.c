@@ -28,6 +28,7 @@
 #include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_format_convert.h"
 #include "util/perf/cpu_trace.h"
+#include "util/bitscan.h"
 
 int
 vir_get_nsrc(struct qinst *inst)
@@ -495,6 +496,7 @@ vir_new_block(struct v3d_compile *c)
                                                _mesa_key_pointer_equal);
 
         block->index = c->next_block_index++;
+        block->loop_depth = c->current_loop_depth;
 
         return block;
 }
@@ -1276,6 +1278,41 @@ v3d_nir_lower_16bit_norm(nir_shader *s, struct v3d_compile *c)
         return nir_shader_intrinsics_pass(s, lower_16bit_norm, nir_metadata_control_flow, c);
 }
 
+/* Dynamic alpha-to-one lowering for VK_EXT_extended_dynamic_state3.
+ * Conditionally replaces alpha with 1.0 based on a dynamic enable flag.
+ */
+static void
+v3d_nir_lower_alpha_to_one_dynamic(nir_shader *shader, nir_def *dyn_enable)
+{
+        nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+        nir_block *block = nir_impl_last_block(impl);
+
+        nir_foreach_instr(instr, block) {
+                if (instr->type != nir_instr_type_intrinsic)
+                        continue;
+
+                nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                if (intr->intrinsic != nir_intrinsic_store_output)
+                        continue;
+
+                nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+                if (sem.location < FRAG_RESULT_DATA0)
+                        continue;
+
+                nir_def *rgba = intr->src[0].ssa;
+                if (rgba->num_components < 4)
+                        continue;
+
+                nir_builder b = nir_builder_at(nir_before_instr(instr));
+                nir_def *one = nir_imm_floatN_t(&b, 1.0, rgba->bit_size);
+                nir_def *orig_alpha = nir_channel(&b, rgba, 3);
+                nir_def *new_alpha = nir_bcsel(&b, dyn_enable, one, orig_alpha);
+                nir_def *rgb1 = nir_vector_insert_imm(&b, rgba, new_alpha, 3);
+
+                nir_src_rewrite(&intr->src[0], rgb1);
+        }
+}
+
 static void
 v3d_nir_lower_fs_early(struct v3d_compile *c)
 {
@@ -1287,20 +1324,49 @@ v3d_nir_lower_fs_early(struct v3d_compile *c)
         }
 
         if (c->fs_key->software_blend) {
-                if (c->fs_key->sample_alpha_to_coverage) {
-                        assert(c->fs_key->msaa);
+                /* For VK_EXT_extended_dynamic_state3, always compile with
+                 * dynamic alpha-to-coverage and alpha-to-one support when
+                 * MSAA is enabled. The uniforms control whether they're
+                 * actually applied.
+                 */
+                if (c->fs_key->msaa) {
+                        nir_function_impl *impl =
+                                nir_shader_get_entrypoint(c->s);
+                        nir_builder b = nir_builder_at(
+                                nir_before_impl(impl));
+
+                        /* Load dynamic alpha-to-coverage enable flag */
+                        nir_def *a2c_enabled = nir_ine_imm(&b,
+                                nir_load_alpha_to_coverage_enabled_v3d(&b), 0);
 
                         NIR_PASS(_, c->s, nir_lower_alpha_to_coverage,
-                                 true, NULL);
-                }
+                                 true, a2c_enabled);
 
-                if (c->fs_key->sample_alpha_to_one)
-                        NIR_PASS(_, c->s, nir_lower_alpha_to_one);
+                        /* Load dynamic alpha-to-one enable flag and apply */
+                        nir_def *a2o_enabled = nir_ine_imm(&b,
+                                nir_load_alpha_to_one_enabled_v3d(&b), 0);
+
+                        v3d_nir_lower_alpha_to_one_dynamic(c->s, a2o_enabled);
+                }
 
                 NIR_PASS(_, c->s, v3d_nir_lower_blend, c);
         }
 
-        NIR_PASS(_, c->s, v3d_nir_lower_logic_ops, c);
+        /* For VK_EXT_extended_dynamic_state3, use dynamic logic op enable
+         * when a non-COPY logic op is specified. The uniform controls whether
+         * it's actually applied at runtime.
+         */
+        if (c->fs_key->logicop_func != PIPE_LOGICOP_COPY) {
+                nir_function_impl *impl = nir_shader_get_entrypoint(c->s);
+                nir_builder b = nir_builder_at(nir_before_impl(impl));
+
+                nir_def *logicop_enabled = nir_ine_imm(&b,
+                        nir_load_logic_op_enabled_v3d(&b), 0);
+
+                NIR_PASS(_, c->s, v3d_nir_lower_logic_ops_dynamic, c,
+                         logicop_enabled);
+        }
+
         NIR_PASS(_, c->s, v3d_nir_lower_16bit_norm, c);
         NIR_PASS(_, c->s, v3d_nir_lower_load_output, c);
 }
@@ -1317,6 +1383,55 @@ v3d_nir_lower_vs_late(struct v3d_compile *c)
         NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
 }
 
+static bool
+v3d_nir_lower_cull_fs(nir_shader *shader, unsigned cull_enables)
+{
+        if (!cull_enables)
+                return false;
+
+        nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+        nir_builder b = nir_builder_at(nir_before_impl(impl));
+
+        /* Find or create cull distance input variable */
+        nir_variable *cull_var = NULL;
+        nir_foreach_shader_in_variable(var, shader) {
+                if (var->data.location == VARYING_SLOT_CULL_DIST0) {
+                        cull_var = var;
+                        break;
+                }
+        }
+
+        if (!cull_var) {
+                cull_var = nir_variable_create(shader, nir_var_shader_in,
+                                               glsl_array_type(glsl_float_type(),
+                                                               util_last_bit(cull_enables),
+                                                               sizeof(float)),
+                                               "cull_distance");
+                cull_var->data.location = VARYING_SLOT_CULL_DIST0;
+                cull_var->data.compact = true;
+        }
+
+        shader->info.cull_distance_array_size = util_last_bit(cull_enables);
+
+        /* Load cull distances and generate discards */
+        nir_def *cond = NULL;
+        for (int i = 0; i < 8 && (cull_enables >> i); i++) {
+                if (!(cull_enables & (1 << i)))
+                        continue;
+
+                nir_def *culldist = nir_load_array_var_imm(&b, cull_var, i);
+                nir_def *this_cond = nir_flt_imm(&b, culldist, 0.0);
+                cond = cond ? nir_ior(&b, cond, this_cond) : this_cond;
+        }
+
+        if (cond) {
+                nir_discard_if(&b, cond);
+                shader->info.fs.uses_discard = true;
+        }
+
+        return nir_progress(true, impl, nir_metadata_none);
+}
+
 static void
 v3d_nir_lower_fs_late(struct v3d_compile *c)
 {
@@ -1331,6 +1446,10 @@ v3d_nir_lower_fs_late(struct v3d_compile *c)
          */
         if (c->fs_key->ucp_enables)
                 NIR_PASS(_, c->s, nir_lower_clip_fs, c->fs_key->ucp_enables, true, false);
+
+        /* Similar lowering for cull distances */
+        if (c->fs_key->cull_enables)
+                NIR_PASS(_, c->s, v3d_nir_lower_cull_fs, c->fs_key->cull_enables);
 
         NIR_PASS(_, c->s, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
 }
@@ -2059,6 +2178,7 @@ v3d_attempt_compile(struct v3d_compile *c)
                 .lower_quad_vote = true,
                 .lower_reduce = true,
                 .lower_rotate_to_shuffle = true,
+                .lower_rotate_clustered_to_shuffle = true,
         };
         NIR_PASS(_, c->s, nir_lower_subgroups, &subgroup_opts);
 
@@ -2908,10 +3028,13 @@ vir_optimize(struct v3d_compile *c)
                 OPTPASS(vir_opt_copy_propagate);
                 OPTPASS(vir_opt_redundant_flags);
                 OPTPASS(vir_opt_dead_code);
-                OPTPASS(vir_opt_small_immediates);
+                OPTPASS(vir_opt_constant_propagate);
+                OPTPASS(vir_opt_algebraic);
                 OPTPASS(vir_opt_constant_alu);
+                OPTPASS(vir_opt_small_immediates);
                 OPTPASS(vir_opt_alu);
                 OPTPASS(vir_opt_redundant_setnnmode);
+                OPTPASS(vir_opt_coalesce_tmu_write);
 
                 if (!progress)
                         break;

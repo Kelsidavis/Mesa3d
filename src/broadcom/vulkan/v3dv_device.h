@@ -140,7 +140,8 @@ void v3dv_meta_texel_buffer_copy_finish(struct v3dv_device *device);
 
 bool v3dv_webgpu_override_enabled(void);
 
-bool v3dv_meta_can_use_tlb(struct v3dv_image *image,
+bool v3dv_meta_can_use_tlb(const struct v3d_device_info *devinfo,
+                           struct v3dv_image *image,
                            uint8_t plane,
                            uint8_t miplevel,
                            const VkOffset3D *offset,
@@ -363,6 +364,17 @@ struct v3dv_device {
       VkPipeline copy_pipeline[8];
    } queries;
 
+   /* Transform feedback indirect draw resources.
+    *
+    * Used to implement vkCmdDrawIndirectByteCountEXT which reads a byte count
+    * from a buffer and converts it to a vertex count for drawing.
+    */
+   struct {
+      VkDescriptorSetLayout descriptor_set_layout;
+      VkPipelineLayout pipeline_layout;
+      VkPipeline pipeline;
+   } tf_draw;
+
    struct v3dv_pipeline_cache default_pipeline_cache;
 
    /* GL_SHADER_STATE_RECORD needs to specify default attribute values. The
@@ -383,6 +395,11 @@ struct v3dv_device {
 
    void *device_address_mem_ctx;
    struct util_dynarray device_address_bo_list; /* Array of struct v3dv_bo * */
+
+   /* Cached array of BDA BO handles for fast submit-time access.
+    * Updated whenever device_address_bo_list changes.
+    */
+   struct util_dynarray device_address_bo_handles; /* Array of uint32_t */
 };
 
 struct v3dv_device_memory {
